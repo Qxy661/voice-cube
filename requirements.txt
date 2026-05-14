@@ -1,21 +1,16 @@
 # 声纹魔方 Voice Cube - 依赖清单
-# Core
+# 核心依赖（必需）
 gradio>=4.0.0
 numpy>=1.24.0
 scipy>=1.11.0
-
-# Audio
 librosa>=0.10.0
 soundfile>=0.12.0
-pyaudio>=0.2.13
-
-# Visualization
 matplotlib>=3.7.0
-
-# AI / RVC
-torch>=2.0.0
-torchaudio>=2.0.0
-faiss-cpu>=1.7.4
-
-# Utilities
 pydub>=0.25.1
+
+# 可选依赖（AI克隆功能，无则使用DSP模拟模式）
+# torch>=2.0.0
+# torchaudio>=2.0.0
+
+# 可选依赖（麦克风录音，Windows需先安装portaudio）
+# pyaudio>=0.2.13
