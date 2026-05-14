@@ -1,6 +1,6 @@
 """
-声纹魔方 - 模仿预设参数库
-每个预设定义一组 DSP 参数组合，实现特定音色模仿效果
+声纹魔方 - 模仿预设参数库 (v2)
+优化后的参数：更自然的人声，更少的伪影
 """
 
 # ==================== 基础区：DSP 模仿经典音色 ====================
@@ -11,16 +11,18 @@ DSP_PRESETS = {
         "description": "浑厚磁性的成熟男声",
         "category": "basic",
         "params": {
-            "pitch_shift": -4,
-            "formant_ratio": 1.15,
+            "pitch_shift": -3,
+            "formant_ratio": 1.10,
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
-            "reverb": 0.1,
-            "eq_bass_boost": 6,
-            "eq_treble_boost": 0,
+            "reverb": 0.08,
+            "eq_bass_boost": 4,
+            "eq_treble_boost": -2,
             "breathiness": 0.0,
             "comb_filter": False,
+            "compressor": True,
+            "exciter": 0.1,
         }
     },
     "child": {
@@ -29,16 +31,18 @@ DSP_PRESETS = {
         "description": "天真可爱的儿童声音",
         "category": "basic",
         "params": {
-            "pitch_shift": 6,
-            "formant_ratio": 0.75,
+            "pitch_shift": 5,
+            "formant_ratio": 0.78,
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
             "reverb": 0.0,
-            "eq_bass_boost": 0,
-            "eq_treble_boost": 3,
+            "eq_bass_boost": -3,
+            "eq_treble_boost": 2,
             "breathiness": 0.0,
             "comb_filter": False,
+            "compressor": True,
+            "exciter": 0.05,
         }
     },
     "robot": {
@@ -49,14 +53,16 @@ DSP_PRESETS = {
         "params": {
             "pitch_shift": 0,
             "formant_ratio": 1.0,
-            "ring_mod": 0.8,
+            "ring_mod": 0.7,
             "ring_freq": 50,
             "telephone": False,
-            "reverb": 0.3,
+            "reverb": 0.25,
             "eq_bass_boost": 0,
-            "eq_treble_boost": 0,
+            "eq_treble_boost": 3,
             "breathiness": 0.0,
             "comb_filter": False,
+            "compressor": False,
+            "exciter": 0.0,
         }
     },
     "minion": {
@@ -65,16 +71,18 @@ DSP_PRESETS = {
         "description": "高亢搞笑的小黄人音色",
         "category": "basic",
         "params": {
-            "pitch_shift": 8,
-            "formant_ratio": 0.6,
+            "pitch_shift": 7,
+            "formant_ratio": 0.65,
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
-            "reverb": 0.1,
-            "eq_bass_boost": 0,
-            "eq_treble_boost": 2,
+            "reverb": 0.08,
+            "eq_bass_boost": -5,
+            "eq_treble_boost": 3,
             "breathiness": 0.0,
             "comb_filter": False,
+            "compressor": True,
+            "exciter": 0.08,
         }
     },
     "old_telephone": {
@@ -93,6 +101,8 @@ DSP_PRESETS = {
             "eq_treble_boost": 0,
             "breathiness": 0.0,
             "comb_filter": False,
+            "compressor": False,
+            "exciter": 0.0,
         }
     },
     "giant": {
@@ -101,16 +111,18 @@ DSP_PRESETS = {
         "description": "低沉威严的巨大生物",
         "category": "basic",
         "params": {
-            "pitch_shift": -8,
-            "formant_ratio": 1.8,
+            "pitch_shift": -6,
+            "formant_ratio": 1.5,
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
-            "reverb": 0.5,
-            "eq_bass_boost": 10,
-            "eq_treble_boost": 0,
+            "reverb": 0.4,
+            "eq_bass_boost": 8,
+            "eq_treble_boost": -3,
             "breathiness": 0.0,
             "comb_filter": False,
+            "compressor": True,
+            "exciter": 0.05,
         }
     },
     "whisper": {
@@ -124,11 +136,13 @@ DSP_PRESETS = {
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
-            "reverb": 0.4,
-            "eq_bass_boost": 0,
-            "eq_treble_boost": 0,
-            "breathiness": 0.7,
+            "reverb": 0.3,
+            "eq_bass_boost": -6,
+            "eq_treble_boost": 2,
+            "breathiness": 0.5,
             "comb_filter": False,
+            "compressor": False,
+            "exciter": 0.0,
         }
     },
     "metallic": {
@@ -139,14 +153,16 @@ DSP_PRESETS = {
         "params": {
             "pitch_shift": -2,
             "formant_ratio": 1.0,
-            "ring_mod": 0.4,
+            "ring_mod": 0.35,
             "ring_freq": 200,
             "telephone": False,
-            "reverb": 0.6,
+            "reverb": 0.5,
             "eq_bass_boost": 0,
             "eq_treble_boost": 4,
             "breathiness": 0.0,
             "comb_filter": True,
+            "compressor": False,
+            "exciter": 0.0,
         }
     },
 }
@@ -208,4 +224,6 @@ def get_default_params() -> dict:
         "eq_treble_boost": 0,
         "breathiness": 0.0,
         "comb_filter": False,
+        "compressor": False,
+        "exciter": 0.0,
     }
