@@ -1,6 +1,7 @@
 """
-声纹魔方 - 可视化模块 (v2)
+声纹魔方 - 可视化模块 (v3)
 科研级精美图表：波形/频谱/语谱图/基频/共振峰/流水线/质量指标
+CJK字体自动检测，跨平台中文渲染
 """
 
 import numpy as np
@@ -8,6 +9,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
+import matplotlib.font_manager as fm
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 import librosa
@@ -16,6 +18,11 @@ import librosa.display
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import SAMPLE_RATE, N_FFT, HOP_LENGTH, N_MELS
+
+# ── CJK 字体自动检测 ────────────────────────────────────────────────
+_cjk_fonts = ["Microsoft YaHei", "SimHei", "Noto Sans SC", "WenQuanYi Micro Hei", "PingFang SC"]
+_available = {f.name for f in fm.fontManager.ttflist}
+_cjk_choice = next((f for f in _cjk_fonts if f in _available), "DejaVu Sans")
 
 # ── 科研级全局样式 ──────────────────────────────────────────────────
 plt.rcParams.update({
@@ -34,6 +41,7 @@ plt.rcParams.update({
     "grid.linewidth": 0.5,
     "font.size": 10,
     "font.family": "sans-serif",
+    "font.sans-serif": [_cjk_choice, "DejaVu Sans"],
     "legend.framealpha": 0.7,
     "legend.edgecolor": "#3A3860",
 })

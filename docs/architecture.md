@@ -20,7 +20,7 @@
 │                    处理调度层 (app.py)                    │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐ │
 │  │ 音频输入处理 │  │ DSP 管线调度 │  │ AI 管线调度      │ │
-│  │ recorder.py  │  │             │  │                 │ │
+│  │ recorder.py  │  │ (11步管线)  │  │ (6步管线)       │ │
 │  └──────┬──────┘  └──────┬──────┘  └───────┬─────────┘ │
 └─────────┼───────────────┼─────────────────┼────────────┘
           │               │                 │
@@ -30,13 +30,19 @@
 │                                                          │
 │  ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────┐ │
 │  │pitch_shift│ │formant_shift│ │ effects  │ │presets   │ │
-│  │PhaseVocdr │ │ LPC共振峰  │ │ 环形调制 │ │ 预设参数 │ │
-│  └──────────┘ └────────────┘ │ 滤波混响 │ └──────────┘ │
+│  │PhaseVocdr │ │ LPC-24     │ │ 环形调制 │ │ 8个DSP   │ │
+│  │多相重采样 │ │ 预加重     │ │ 压缩器   │ │ 2个AI    │ │
+│  └──────────┘ └────────────┘ │ 激励器   │ └──────────┘ │
+│                               │ 梳状滤波 │              │
+│  ┌──────────┐ ┌────────────┐ │ 混响/气声│ ┌──────────┐ │
+│  │preprocess│ │pitch_extract│ └──────────┘ │postproc  │ │
+│  │Wiener降噪│ │ 基频提取   │              │EQ/混响   │ │
+│  │噪声门    │ │ F0-MIDI    │              │LUFS归一化│ │
+│  └──────────┘ └────────────┘              └──────────┘ │
+│                               ┌──────────┐              │
+│                               │visualizer│              │
+│                               │9种图表   │              │
 │                               └──────────┘              │
-│  ┌──────────┐ ┌────────────┐ ┌──────────┐ ┌──────────┐ │
-│  │preprocess│ │pitch_extract│ │postproc  │ │visualizer│ │
-│  │谱减法降噪│ │ 基频提取   │ │EQ/混响   │ │ 可视化   │ │
-│  └──────────┘ └────────────┘ └──────────┘ └──────────┘ │
 └─────────────────────────────────────────────────────────┘
                             │
                             ▼
@@ -46,6 +52,7 @@
 │  │                rvc_engine.py                      │  │
 │  │  ┌────────────┐  ┌────────────┐  ┌────────────┐ │  │
 │  │  │ 模型加载    │  │  特征提取   │  │  推理合成   │ │  │
+│  │  │            │  │            │  │ DSP模拟回退 │ │  │
 │  │  └────────────┘  └────────────┘  └────────────┘ │  │
 │  └──────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
@@ -53,75 +60,102 @@
 
 ## 2. 数据流
 
-### 2.1 基础模仿数据流
+### 2.1 基础模仿数据流（11 步管线）
 
 ```
 用户输入 (麦克风/文件)
     │
     ▼
-process_audio_input()  →  (audio, sr)
+process_audio_input()  →  (audio, sr)  [含 DC 偏移去除]
     │
     ▼
-normalize_audio()  →  标准化音频
+np.clip()  →  防削波裁剪
     │
     ▼
 librosa.resample()  →  22050Hz 标准采样率
     │
-    ├──→ pitch_shift()      ──→ 变调后音频
-    ├──→ formant_shift()    ──→ 共振峰移位后音频
-    ├──→ ring_modulate()    ──→ 环形调制后音频
-    ├──→ telephone_filter() ──→ 带通滤波后音频
-    ├──→ add_breathiness()  ──→ 气声混合后音频
-    ├──→ apply_reverb()     ──→ 混响后音频
-    └──→ parametric_eq()    ──→ EQ 后音频
+    ▼
+DSP 11 步管线（顺序执行）:
+    │
+    ├── 1. pitch_shift()            → 变调后音频
+    ├── 2. formant_shift()          → 共振峰移位后音频
+    ├── 3. ring_modulate()          → 环形调制后音频
+    ├── 4. telephone_filter()       → 带通滤波后音频
+    ├── 5. comb_filter_metallic()   → 梳状滤波后音频
+    ├── 6. add_breathiness()        → 气声混合后音频
+    ├── 7. harmonics_exciter()      → 谐波激励后音频
+    ├── 8. soft_knee_compressor()   → 动态压缩后音频
+    ├── 9. apply_reverb()           → 混响后音频
+    ├── 10. parametric_eq()         → EQ 后音频
+    └── 11. normalize_loudness()    → LUFS 归一化后音频
     │
     ▼
 save_audio()  →  WAV 文件
     │
     ▼
-visualizer  →  波形图 / 频谱图 / 语谱图
+visualizer  →  波形图 / 频谱图 / 语谱图 / 共振峰轨迹 / 质量指标
 ```
 
-### 2.2 AI 克隆数据流
+### 2.2 AI 克隆数据流（6 步管线）
 
 ```
 用户输入 (麦克风/文件)
     │
     ▼
-normalize_audio()  →  标准化音频
+process_audio_input()  →  (audio, sr)  [含 DC 偏移去除]
     │
     ▼
-spectral_subtraction()  →  降噪后音频    [DSP预处理]
+np.clip()  →  防削波裁剪
     │
     ▼
-extract_f0()  →  F0 轮廓线               [DSP特征提取]
+AI 6 步管线:
     │
-    ▼
-rvc_engine.infer(audio, f0)  →  克隆音频  [AI音色重构]
-    │
-    ▼
-apply_reverb()  →  润色后音频             [DSP后处理]
+    ├── 1. spectral_subtraction()   → Wiener 降噪后音频    [DSP预处理]
+    ├── 2. extract_f0()             → F0 轮廓线             [DSP特征提取]
+    ├── 3. rvc_engine.infer()       → 克隆音频              [AI音色重构 / DSP模拟]
+    ├── 4. soft_knee_compressor()   → 动态压缩后音频        [DSP后处理]
+    ├── 5. apply_reverb()           → 润色后音频            [DSP后处理]
+    └── 6. normalize_loudness()     → LUFS 归一化后音频     [DSP后处理]
     │
     ▼
 save_audio() + visualizer  →  输出 + 可视化
 ```
 
+### 2.3 录音输入处理
+
+```
+麦克风/文件输入
+    │
+    ▼
+process_audio_input()
+    ├── 元组格式 (sr, data) → 解包
+    ├── numpy 数组格式 → 直接使用
+    ├── 文件路径 → soundfile.read()
+    └── None → 返回 (None, None)
+    │
+    ▼
+remove_dc_offset()  →  减去均值，去除直流偏移
+    │
+    ▼
+返回 (audio, sr)
+```
+
 ## 3. 模块职责
 
-| 模块 | 文件 | 职责 |
-|------|------|------|
-| 配置 | config.py | 全局参数：采样率、帧长、滤波器参数等 |
-| 预设库 | dsp/presets.py | 8个DSP预设 + 2个AI预设的参数定义 |
-| 变调 | dsp/pitch_shift.py | Phase Vocoder 变调不变速 |
-| 共振峰 | dsp/formant_shift.py | LPC 分析/合成，极点移动改变体型 |
-| 特效 | dsp/effects.py | 环形调制、带通滤波、梳状滤波、混响、气声 |
-| 降噪 | dsp/preprocessor.py | 谱减法去除环境底噪 |
-| 基频 | dsp/pitch_extract.py | 自相关法/pYIN 提取 F0 轮廓线 |
-| 后处理 | dsp/postprocessor.py | 三段参量 EQ + Schroeder 混响 |
-| 可视化 | dsp/visualizer.py | 波形/频谱/语谱图/F0/流水线状态 |
-| AI引擎 | ai/rvc_engine.py | RVC 模型管理与推理封装 |
-| 录音 | ui/recorder.py | 音频输入格式统一、保存、标准化 |
-| 主界面 | app.py | Gradio Blocks 界面构建与事件绑定 |
+| 模块 | 文件 | 职责 | v3 变更 |
+|------|------|------|---------|
+| 配置 | config.py | 全局参数：采样率、帧长、滤波器、压缩器、EQ 参数 | 新增 COMPRESSOR_*/EQ_CROSSOVER_*/TARGET_LUFS |
+| 预设库 | dsp/presets.py | 8个DSP预设 + 2个AI预设的参数定义 | 新增 compressor/exciter 参数 |
+| 变调 | dsp/pitch_shift.py | Phase Vocoder 变调不变速 | 多相重采样替代线性插值 |
+| 共振峰 | dsp/formant_shift.py | LPC 分析/合成，极点移动改变体型 | LPC-24 + 预加重 + 稳定性检查 |
+| 特效 | dsp/effects.py | 环形调制、带通滤波、梳状滤波、混响、气声 | 新增 soft_knee_compressor/harmonics_exciter |
+| 降噪 | dsp/preprocessor.py | Wiener 滤波降噪、噪声门 | Wiener替代基础谱减法，噪声门v2 |
+| 基频 | dsp/pitch_extract.py | 自相关法/pYIN 提取 F0 轮廓线 | 新增 f0_to_midi |
+| 后处理 | dsp/postprocessor.py | 参量EQ + 混响 + LUFS归一化 | biquad shelving替代iirpeak，新增LUFS |
+| 可视化 | dsp/visualizer.py | 波形/频谱/语谱图/F0/流水线 | 新增共振峰轨迹/差分语谱图/质量指标仪表盘，CJK字体 |
+| AI引擎 | ai/rvc_engine.py | RVC 模型管理与推理封装 | 模拟模式扩展，压缩器/激励器/EQ管线 |
+| 录音 | ui/recorder.py | 音频输入格式统一、保存、标准化 | DC去除、临时文件追踪与清理 |
+| 主界面 | app.py | Gradio Blocks 界面构建与事件绑定 | 11步管线、修复返回值/废弃API |
 
 ## 4. 技术栈
 
@@ -129,9 +163,11 @@ save_audio() + visualizer  →  输出 + 可视化
 |------|------|------|
 | Web 框架 | Gradio | >= 4.0 |
 | DSP 核心 | librosa + scipy + numpy | >= 0.10 / >= 1.11 / >= 1.24 |
-| AI 引擎 | PyTorch + RVC | >= 2.0 |
+| AI 引擎 | PyTorch + RVC (可选) | >= 2.0 |
 | 可视化 | matplotlib | >= 3.7 |
-| 音频 I/O | soundfile + pyaudio | >= 0.12 / >= 0.2 |
+| 音频 I/O | soundfile | >= 0.12 |
+| 测试 | pytest + pytest-cov (开发) | >= 7.0 / >= 4.0 |
+| 代码质量 | ruff (开发) | >= 0.1.0 |
 
 ## 5. 扩展点
 
@@ -139,3 +175,4 @@ save_audio() + visualizer  →  输出 + 可视化
 - **新增 AI 模型**：将 `.pth` 文件放入 `assets/models/`，在 `AI_PRESETS` 中注册
 - **新增特效**：在 `dsp/effects.py` 中添加新函数，在 `app.py` 中接入管线
 - **新增可视化**：在 `dsp/visualizer.py` 中添加新图表函数
+- **新增测试**：在 `tests/test_dsp.py` 中添加测试函数

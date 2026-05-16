@@ -1,8 +1,8 @@
 """
-声纹魔方 Voice Cube v2 — 基于 DSP 与混合 AI 的语音模仿秀系统
+声纹魔方 Voice Cube v3 — 基于 DSP 与混合 AI 的语音模仿秀系统
 主界面入口：Gradio Blocks 构建双 Tab 交互工作台
 
-v2 改进: 高质量变调、压缩器、谐波激励、LUFS归一化、科研级可视化
+v3 改进: Bug修复、CJK字体、RVC模拟增强、测试覆盖、工程质量提升
 """
 
 import os
@@ -33,7 +33,7 @@ from dsp.visualizer import (
     plot_waveform_comparison, plot_spectrum_comparison,
     plot_spectrogram_comparison, plot_f0_contour, plot_pipeline_flow,
     plot_formant_trajectory, plot_delta_spectrogram,
-    plot_quality_metrics, plot_transient_analysis,
+    plot_quality_metrics,
 )
 from ui.recorder import process_audio_input, save_audio, normalize_audio
 from ai.rvc_engine import RVCEngine
@@ -48,11 +48,11 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
                      pitch_shift_val=None, formant_ratio_val=None,
                      ring_mod_val=None, reverb_val=None,
                      breathiness_val=None) -> tuple:
-    """应用 DSP 预设处理音频 (v2: 含压缩器/激励器/LUFS归一化)"""
+    """应用 DSP 预设处理音频 (v3: 含压缩器/激励器/LUFS归一化)"""
     if audio is None:
-        return None, None, None
+        return None, None
 
-    audio = normalize_audio(audio)
+    audio = np.clip(audio, -1.0, 1.0)
     if sr != SAMPLE_RATE:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
         sr = SAMPLE_RATE
@@ -193,7 +193,7 @@ def process_ai_clone(audio_input, clone_target, custom_model_file):
         return None, None, None, None, None, None, None, None, None
 
     try:
-        audio = normalize_audio(audio)
+        audio = np.clip(audio, -1.0, 1.0)
         if sr != SAMPLE_RATE:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
             sr = SAMPLE_RATE
@@ -543,7 +543,7 @@ def build_ui():
 
                 # 事件绑定
                 def toggle_custom_model(target):
-                    return gr.update(visible=(target == "custom"))
+                    return gr.File(visible=(target == "custom"))
 
                 clone_target.change(
                     fn=toggle_custom_model,
