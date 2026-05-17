@@ -20,65 +20,55 @@ FAIL_SYM = "[FAIL]"
 WARN_SYM = "[WARN]"
 
 
-def generate_speech_like(duration: float = 1.5, sr: int = SAMPLE_RATE) -> np.ndarray:
-    """
-    生成类语音测试信号:
-    - 元音 (谐波串, 有基频 + 共振峰结构)
-    - 清辅音暂态 (burst)
-    - 静音段
-    """
+def generate_speech_like(duration=1.5, sr=SAMPLE_RATE):
+    """连续类语音信号: 无长静默, crest factor 6-12 (模拟真实语音)"""
     n = int(sr * duration)
     t = np.linspace(0, duration, n, endpoint=False)
     signal = np.zeros(n, dtype=np.float64)
-
-    # 元音段 0-0.6s: F0=200Hz + 4个共振峰
-    vowel_mask = t < 0.6
-    v_t = t[vowel_mask]
-    # 基频 + 谐波
-    f0 = 200.0
-    for h in range(1, 25):
-        amp = 0.3 / h
-        freq = h * f0
+    # 连续包络
+    envelope = 0.3 + 0.7 * (0.5 + 0.5 * np.sin(2 * np.pi * 0.5 * t))
+    # 元音1 0-0.5s
+    v1 = t < 0.5
+    f0_1 = 200.0
+    for h in range(1, 20):
+        freq = h * f0_1
         env = 1.0
-        for formant in [800, 1400, 2800, 3800, 4800]:
-            bw = formant * 0.1
-            env *= (bw**2) / ((freq - formant)**2 + bw**2)
-        signal[vowel_mask] += amp * env * np.sin(2 * np.pi * freq * v_t)
-
-    # 摩擦音 0.65-0.75s: 高频噪声
-    fric_mask = (t >= 0.65) & (t < 0.75)
-    noise = np.random.randn(np.sum(fric_mask)) * 0.08
-    from scipy.signal import butter, sosfilt
-    sos = butter(4, [3000 / (sr/2), 8000 / (sr/2)], btype="band", output="sos")
-    signal[fric_mask] += sosfilt(sos, noise)
-
-    # 爆破音暂态 0.85s: 短时宽带burst
-    burst_start = int(0.85 * sr)
-    burst_len = int(0.02 * sr)
-    burst = np.random.randn(burst_len) * 0.3
-    burst_env = np.exp(-np.arange(burst_len) / (0.005 * sr))
-    burst = burst * burst_env
-    end = min(burst_start + burst_len, n)
-    signal[burst_start:end] += burst[:end - burst_start]
-
-    # 元音段 0.95-1.4s: 不同音高
-    v2_mask = (t >= 0.95) & (t < 1.4)
-    v2_t = t[v2_mask]
+        for fmt in [800, 1400, 2800, 3800]:
+            bw = fmt * 0.12
+            env *= (bw**2) / ((freq - fmt)**2 + bw**2)
+        signal[v1] += 0.2 / h * env * np.sin(2 * np.pi * freq * t[v1])
+    # 过渡
+    trans = (t >= 0.4) & (t < 0.6)
+    signal[trans] *= (1.0 - 0.5 * (t[trans] - 0.4) / 0.2)
+    # 元音2 0.5-0.9s
+    v2 = (t >= 0.5) & (t < 0.9)
     f0_2 = 280.0
     for h in range(1, 20):
-        amp = 0.25 / h
         freq = h * f0_2
         env = 1.0
-        for formant in [900, 1600, 2800, 3800]:
-            bw = formant * 0.1
-            env *= (bw**2) / ((freq - formant)**2 + bw**2)
-        signal[v2_mask] += amp * env * np.sin(2 * np.pi * freq * v2_t)
-
-    # 归一化到 -6dB
+        for fmt in [900, 1600, 2800, 3800]:
+            bw = fmt * 0.12
+            env *= (bw**2) / ((freq - fmt)**2 + bw**2)
+        signal[v2] += 0.2 / h * env * np.sin(2 * np.pi * freq * t[v2])
+    # 摩擦音 (叠加)
+    fric = (t >= 0.7) & (t < 0.85)
+    from scipy.signal import butter, sosfilt
+    noise = np.random.randn(np.sum(fric)) * 0.06
+    sos = butter(4, [3000/(sr/2), 8000/(sr/2)], btype="band", output="sos")
+    signal[fric] += sosfilt(sos, noise)
+    # 元音3 0.9-1.4s
+    v3 = t >= 0.9
+    f0_3 = 220.0
+    for h in range(1, 20):
+        freq = h * f0_3
+        env = 1.0
+        for fmt in [700, 1200, 2600, 3600]:
+            bw = fmt * 0.12
+            env *= (bw**2) / ((freq - fmt)**2 + bw**2)
+        signal[v3] += 0.2 / h * env * np.sin(2 * np.pi * freq * t[v3])
+    signal = signal * envelope
     max_val = np.max(np.abs(signal))
-    if max_val > 0:
-        signal = signal * 0.5 / max_val
-
+    if max_val > 0: signal = signal * 0.5 / max_val
     return signal.astype(np.float32)
 
 

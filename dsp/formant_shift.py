@@ -1,6 +1,6 @@
 """
-声纹魔方 - LPC 共振峰移位引擎 (v6)
-双模式: 小变化用EQ近似 (干净), 大变化用LPC (精确)
+声纹魔方 - LPC 共振峰移位引擎 (v7)
+双模式: 小变化用EQ近似 (干净), 大变化用LPC (帧级稳定性保护)
 """
 
 import numpy as np
@@ -141,8 +141,10 @@ def _detect_voiced_frames(audio: np.ndarray, sr: int, frame_len: int, hop: int) 
 
 def _lpc_formant_shift(audio: np.ndarray, ratio: float, order: int) -> np.ndarray:
     """
-    完整 LPC 共振峰移位 (仅用于极端比例)
-    ratio < 0.85 或 ratio > 1.15
+    完整 LPC 共振峰移位 (v7: 每帧稳定性检查 + 溢出保护)
+
+    使用 LPC 分析-根操作-合成管线。
+    每帧检查输出是否稳定，溢出帧回退到原信号。
     """
     sr = SAMPLE_RATE
     frame_len = 2048
@@ -154,6 +156,9 @@ def _lpc_formant_shift(audio: np.ndarray, ratio: float, order: int) -> np.ndarra
 
     output = np.zeros(len(audio) + frame_len)
     window_sum = np.zeros(len(audio) + frame_len)
+
+    # 计算帧的参考电平上限 (防止溢出)
+    frame_rms_ref = np.sqrt(np.mean(audio ** 2)) * 2.0
 
     for i in range(n_frames):
         start = i * hop
@@ -177,7 +182,13 @@ def _lpc_formant_shift(audio: np.ndarray, ratio: float, order: int) -> np.ndarra
             window_sum[start:end] += window ** 2
             continue
 
-        roots = np.roots(a)
+        try:
+            roots = np.roots(a)
+        except Exception:
+            output[start:end] += windowed
+            window_sum[start:end] += window ** 2
+            continue
+
         new_roots = []
         used = set()
 
@@ -199,6 +210,8 @@ def _lpc_formant_shift(audio: np.ndarray, ratio: float, order: int) -> np.ndarra
                     mag = np.abs(r)
 
                     new_angle = angle * ratio
+                    # 防止角度反绕 (超过 Nyquist 后 pole 会映射到低频端不稳定)
+                    new_angle = np.clip(new_angle, 0.001, np.pi * 0.97)
                     new_r = mag * np.exp(1j * new_angle)
                     new_roots.append(new_r)
                     new_roots.append(np.conj(new_r))
@@ -210,18 +223,44 @@ def _lpc_formant_shift(audio: np.ndarray, ratio: float, order: int) -> np.ndarra
                 used.add(j)
 
         new_roots = np.array(new_roots)
-        new_a = np.poly(new_roots)
-        new_a = np.real(new_a)
-
-        poles = np.roots(new_a)
-        if np.any(np.abs(poles) >= 1.0):
-            scale = 0.98 / np.max(np.abs(poles))
-            poles = poles * scale
-            new_a = np.poly(poles)
+        try:
+            new_a = np.poly(new_roots)
             new_a = np.real(new_a)
+        except Exception:
+            output[start:end] += windowed
+            window_sum[start:end] += window ** 2
+            continue
+
+        # 合成滤波器稳定性检查
+        try:
+            poles = np.roots(new_a)
+            if np.any(np.abs(poles) >= 1.0):
+                scale = 0.95 / np.max(np.abs(poles))
+                poles = poles * scale
+                new_a = np.poly(poles)
+                new_a = np.real(new_a)
+        except Exception:
+            output[start:end] += windowed
+            window_sum[start:end] += window ** 2
+            continue
 
         residual = lfilter(a, [1.0], windowed)
         synthesized = lfilter([1.0], new_a, residual)
+
+        # 帧级稳定性检查: 输出异常时回退到原信号
+        frame_in_rms = np.sqrt(np.mean(frame ** 2))
+        frame_out_rms = np.sqrt(np.mean(synthesized ** 2))
+        frame_in_peak = np.max(np.abs(frame))
+        frame_out_peak = np.max(np.abs(synthesized))
+        use_fallback = False
+        if not np.all(np.isfinite(synthesized)):
+            use_fallback = True
+        elif frame_in_rms > 1e-8 and frame_out_rms > frame_in_rms * 8:
+            use_fallback = True
+        elif frame_in_peak > 1e-8 and frame_out_peak > frame_in_peak * 5:
+            use_fallback = True
+        if use_fallback:
+            synthesized = windowed
 
         output[start:end] += synthesized * window
         window_sum[start:end] += window ** 2
@@ -230,16 +269,22 @@ def _lpc_formant_shift(audio: np.ndarray, ratio: float, order: int) -> np.ndarra
     output[:len(audio)][nonzero[:len(audio)]] /= window_sum[:len(audio)][nonzero[:len(audio)]]
     output = output[:len(audio)]
 
+    # 最终防溢出: 整体限制不超过输入的 5x
+    input_max = np.max(np.abs(audio))
+    output_max = np.max(np.abs(output))
+    if output_max > input_max * 5 and input_max > 1e-8:
+        output = output * (input_max * 5 / output_max)
+
     return output.astype(np.float32)
 
 
 def formant_shift(audio: np.ndarray, sr: int, ratio: float,
                   order: int = LPC_ORDER) -> np.ndarray:
     """
-    共振峰移位 (v6): 双模式策略
+    共振峰移位 (v7): 双模式策略
 
-    - |ratio-1.0| < 0.15: EQ 倾斜滤波近似 (干净无伪影)
-    - |ratio-1.0| >= 0.15: 完整 LPC 共振峰移位 + 清浊音检测
+    - |ratio-1.0| < 0.20: EQ 搁架滤波近似 (干净无伪影, 数值稳定)
+    - |ratio-1.0| >= 0.20: 完整 LPC 共振峰移位 + 清浊音检测 + 帧级稳定性保护
     """
     if ratio == 1.0:
         return audio.copy()
@@ -247,7 +292,7 @@ def formant_shift(audio: np.ndarray, sr: int, ratio: float,
     ratio = np.clip(ratio, 0.4, 2.5)
 
     # 判断使用哪种模式
-    if abs(ratio - 1.0) < 0.15:
+    if abs(ratio - 1.0) < 0.20:
         # 模式 A: EQ 近似 (clean, 无 LPC 伪影)
         return _formant_eq_approximation(audio, ratio)
     else:

@@ -112,6 +112,11 @@ def apply_reverb(audio: np.ndarray, sr: int, wet: float = 0.3) -> np.ndarray:
     dry = 1.0 - wet * 0.5
     output = dry * audio_f + wet * result
 
+    # 防混响过冲 (高 decay 时梳状滤波器重叠导致增益 > 1.0)
+    max_val = np.max(np.abs(output))
+    if max_val > 0.99:
+        output = output * 0.99 / max_val
+
     return output.astype(np.float32)
 
 
