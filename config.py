@@ -66,6 +66,13 @@ THEME_BG = "#0F0E17"          # 深色背景
 THEME_SURFACE = "#1A1A2E"     # 卡片背景
 THEME_TEXT = "#EAEAEA"        # 文字颜色
 
+# ==================== RVC 参数 ====================
+RVC_SAMPLE_RATE = 16000        # HuBERT/ContentVec 输入采样率
+RVC_HOP_LENGTH = 320           # RVC 内部帧移 (@16kHz, 对应 ~50Hz 帧率)
+RVC_PAD_SEC = 0.08             # 反射填充秒数
+RVC_F0_MIN = 40                # F0 下限 (Hz)
+RVC_F0_MAX = 1600              # F0 上限 (Hz)
+
 # ==================== 路径配置 ====================
 import os
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

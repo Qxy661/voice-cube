@@ -44,18 +44,41 @@ rvc_engine = RVCEngine()
 
 
 # ==================== DSP 处理管线 ====================
+def _pre_emphasis(audio: np.ndarray, coeff: float = 0.97) -> np.ndarray:
+    """预加重: y[n] = x[n] - coeff * x[n-1], 提升高频分量"""
+    return np.append(audio[0], audio[1:] - coeff * audio[:-1]).astype(audio.dtype)
+
+
+def _de_emphasis(audio: np.ndarray, coeff: float = 0.97) -> np.ndarray:
+    """去加重: y[n] = x[n] + coeff * y[n-1], 恢复原始频谱倾斜"""
+    out = np.zeros_like(audio)
+    out[0] = audio[0]
+    for i in range(1, len(audio)):
+        out[i] = audio[i] + coeff * out[i - 1]
+    return out.astype(audio.dtype)
+
+
+FINAL_NOISE_GATE_THRESHOLD = -45  # 二次噪声门: 比入口略高(经处理噪声底可能稍高)
+
+
 def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
                      pitch_shift_val=None, formant_ratio_val=None,
                      ring_mod_val=None, reverb_val=None,
                      breathiness_val=None) -> tuple:
-    """应用 DSP 预设处理音频 (v5: 含噪声门控, 抑制静音段噪声底放大)"""
+    """
+    应用 DSP 预设处理音频 (v6: 修正管线顺序 + 预加重/去加重 + 二次噪声门)
+
+    管线:
+      noise_gate → resample → pre-emphasis → pitch → formant → effects
+      → EQ → reverb → de-emphasis → soft_limiter → noise_gate → LUFS
+    """
     if audio is None:
         return None, None
 
-    # 噪声门控: 管线入口抑制静音段噪声底, 防止被后续处理放大
+    # Step 0: 入口噪声门控 — 抑制输入噪声底
     audio = noise_gate(audio, sr)
 
-    audio = _soft_limiter(audio)
+    # Step 1: 统一采样率
     if sr != SAMPLE_RATE:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
         sr = SAMPLE_RATE
@@ -74,41 +97,56 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
     if breathiness_val is not None:
         params["breathiness"] = breathiness_val
 
-    # Step 1: 变调 (如果后续还要做独立 formant_shift, 则关闭 preserve_formants)
+    # Step 2: 预加重 (提升高频, 使后续处理更准确)
+    audio_f64 = _pre_emphasis(audio.astype(np.float64))
+
+    # Step 3: 变调 (如果后续还要做独立 formant_shift, 则关闭 preserve_formants)
     has_formant = abs(params.get("formant_ratio", 1.0) - 1.0) > 0.01
     if params.get("pitch_shift", 0) != 0:
-        audio = pitch_shift(audio, sr, params["pitch_shift"],
-                            preserve_formants=(not has_formant))
+        audio_f64 = pitch_shift(audio_f64, sr, params["pitch_shift"],
+                                preserve_formants=(not has_formant))
 
-    # Step 2: 共振峰移位 (仅在需要时)
+    # Step 4: 共振峰移位 (仅在需要时)
     if has_formant:
-        audio = formant_shift(audio, sr, params["formant_ratio"])
+        audio_f64 = formant_shift(audio_f64, sr, params["formant_ratio"])
 
-    # Step 3: 特效（按需选择性应用，不叠加）
+    # Step 5: 特效（按需选择性应用，不叠加）
     if params.get("ring_mod", 0) > 0:
         ring_freq = params.get("ring_freq", 50)
-        audio = ring_modulate(audio, sr, params["ring_mod"], ring_freq)
+        audio_f64 = ring_modulate(audio_f64, sr, params["ring_mod"], ring_freq)
     elif params.get("telephone", False):
-        audio = telephone_filter(audio, sr)
+        audio_f64 = telephone_filter(audio_f64, sr)
     elif params.get("comb_filter", False):
-        audio = comb_filter_metallic(audio, sr)
+        audio_f64 = comb_filter_metallic(audio_f64, sr)
 
-    # Step 4: 气声
+    # Step 6: 气声
     if params.get("breathiness", 0) > 0:
-        audio = add_breathiness(audio, sr, params["breathiness"])
+        audio_f64 = add_breathiness(audio_f64, sr, params["breathiness"])
 
-    # Step 5: 混响
-    if params.get("reverb", 0) > 0:
-        audio = apply_reverb(audio, sr, params["reverb"])
-
-    # Step 6: EQ
+    # Step 7: EQ (先EQ再混响 — 混响应该作用于调整后的频谱)
     bass_boost = params.get("eq_bass_boost", 0)
     treble_boost = params.get("eq_treble_boost", 0)
     if bass_boost != 0 or treble_boost != 0:
-        audio = parametric_eq(audio, sr, bass_boost=bass_boost, treble_boost=treble_boost)
+        audio_f64 = parametric_eq(audio_f64, sr,
+                                  bass_boost=bass_boost,
+                                  treble_boost=treble_boost)
 
-    # 最终: 软限幅 + LUFS 响度归一化（仅此一次）
-    audio = _soft_limiter(audio).astype(np.float32)
+    # Step 8: 混响
+    if params.get("reverb", 0) > 0:
+        audio_f64 = apply_reverb(audio_f64, sr, params["reverb"])
+
+    # Step 9: 去加重 (恢复频谱)
+    audio_f64 = _de_emphasis(audio_f64)
+
+    # Step 10: 软限幅
+    audio = _soft_limiter(audio_f64).astype(np.float32)
+
+    # Step 11: 二次噪声门 (在LUFS前抑制处理引入的噪声底)
+    audio = noise_gate(audio, sr,
+                       threshold_db=FINAL_NOISE_GATE_THRESHOLD,
+                       hold_ms=20)
+
+    # Step 12: LUFS 响度归一化 (块级门控, 不放大静音段)
     audio = normalize_loudness(audio, sr)
 
     return audio, sr

@@ -12,6 +12,10 @@ matplotlib>=3.7.0
 # torch>=2.0.0
 # torchaudio>=2.0.0
 
+# 可选依赖（RVC ONNX 实时推理）
+# pip install onnxruntime>=1.17.0 soundfile>=0.12.0
+# onnxruntime>=1.17.0
+
 # 可选依赖（麦克风录音，Windows需先安装portaudio）
 # pyaudio>=0.2.13
 

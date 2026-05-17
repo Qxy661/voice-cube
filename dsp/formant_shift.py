@@ -180,19 +180,26 @@ def _stft_formant_shift(audio: np.ndarray, ratio: float) -> np.ndarray:
     # 4. Fine structure = log_mag - envelope
     fine = log_mag - envelope
 
-    # 5. Frequency warping of envelope
+    # 5. Frequency warping of envelope (VAD: skip silent frames)
+    #  帧级能量检测: 跳过静音/噪声帧的包络扭曲 (噪声频谱被拉伸产生可听伪影)
     orig_bins = np.arange(n_freq)
     warped_env = np.zeros_like(envelope)
+    frame_energy = np.sum(mag, axis=0)
+    energy_threshold = np.mean(frame_energy) * 0.1
+    vad_flags = frame_energy >= energy_threshold
 
     #  频率扭曲: 统一使用 new_bins = orig_bins / ratio
     #   ratio > 1.0 → 拉伸 → 共振峰上移 (小体型, 明亮)
     #   ratio < 1.0 → 压缩 → 共振峰下移 (大体型, 低沉)
     new_bins = orig_bins / ratio
     for f in range(n_frames):
-        warped_env[:, f] = np.interp(
-            new_bins, orig_bins, envelope[:, f],
-            left=envelope[0, f], right=envelope[-1, f],
-        )
+        if not vad_flags[f]:
+            warped_env[:, f] = envelope[:, f]  # 非语音帧: 保持原包络(不扭曲)
+        else:
+            warped_env[:, f] = np.interp(
+                new_bins, orig_bins, envelope[:, f],
+                left=envelope[0, f], right=envelope[-1, f],
+            )
     if ratio > 1.0:
         # 倾斜补偿: 拉伸后高频能量扩散, 轻微提升
         tilt_comp = np.log(ratio) * 0.5

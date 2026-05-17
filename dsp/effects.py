@@ -160,28 +160,43 @@ def noise_gate(audio: np.ndarray, sr: int,
                threshold_db: float = -50,
                attack_ms: float = 5,
                release_ms: float = 100,
-               knee_db: float = 6) -> np.ndarray:
+               hold_ms: float = 50,
+               knee_db: float = 24) -> np.ndarray:
     """
-    软噪声门 (v1): RMS 包络跟随 + 软拐点增益
+    增强软噪声门 (v2): 宽拐点 + 深度衰减 + 平滑RMS + hold时间
 
-    当信号 RMS 低于阈值时平滑衰减增益，抑制静音段的噪声底。
-    拐点区域用平方律过渡避免硬开关咔哒声。
+    改进 (vs v1):
+    - 宽拐点 (24dB): 更平缓的增益过渡，减少咔哒声
+    - 深度衰减 (-80dB gain_floor): 彻底抑制静音段噪声底
+    - 线性插值RMS包络: 消除帧边界跳变伪影
+    - Hold时间: 语音末尾保持开状态，避免切断尾音
     """
     threshold = 10 ** (threshold_db / 20.0)
     knee_width = 10 ** ((threshold_db - knee_db) / 20.0)
+    gain_floor = 10 ** (-80 / 20.0)  # -80dB
 
     # RMS 包络检测 (20ms 帧, 75% 重叠)
     frame_len = int(sr * 0.02)
     hop = frame_len // 4
     n_frames = max(1, (len(audio) - frame_len) // hop)
 
-    # 逐帧 RMS → 插值包络
-    rms_env = np.zeros(len(audio))
+    # 逐帧 RMS
+    rms_frames = np.zeros(n_frames)
     for i in range(n_frames):
         start = i * hop
         end = min(start + frame_len, len(audio))
-        rms = np.sqrt(np.mean(audio[start:end] ** 2))
-        rms_env[start:end] = rms
+        rms_frames[i] = np.sqrt(np.mean(audio[start:end] ** 2))
+
+    # 线性插值到样本级 (消除帧边界阶跃)
+    rms_env = np.zeros(len(audio))
+    for i in range(n_frames - 1):
+        start = i * hop
+        end = min((i + 1) * hop, len(audio))
+        n_seg = end - start
+        if n_seg > 0:
+            rms_env[start:end] = np.linspace(rms_frames[i], rms_frames[i + 1], n_seg)
+    start = (n_frames - 1) * hop
+    rms_env[start:] = rms_frames[-1]
 
     # attack/release 平滑
     attack = np.exp(-1.0 / (sr * attack_ms / 1000.0))
@@ -195,16 +210,29 @@ def noise_gate(audio: np.ndarray, sr: int,
             env_val = release * env_val + (1 - release) * rms_env[i]
         smooth_env[i] = env_val
 
+    # Hold: 信号跨过阈值后保持 open hold_ms, 避免语音末尾快速开关
+    hold_samples = int(sr * hold_ms / 1000.0)
+    hold_gate = np.ones(len(audio), dtype=bool)
+    counter = 0
+    for i in range(len(smooth_env)):
+        if smooth_env[i] >= threshold:
+            counter = hold_samples
+        elif counter > 0:
+            counter -= 1
+        hold_gate[i] = (counter > 0) or (smooth_env[i] >= threshold)
+
     # 计算增益: 低于阈值时衰减, 拐区平方律过渡
     gain = np.ones(len(audio))
-    gate_region = smooth_env < threshold
-    if np.any(gate_region):
-        full_gate = smooth_env < knee_width
-        gain[full_gate] = (smooth_env[full_gate] / threshold) ** 2 * 0.01
-        knee_region = (~full_gate) & gate_region
-        if np.any(knee_region):
-            t = (smooth_env[knee_region] - knee_width) / (threshold - knee_width)
-            gain[knee_region] = t ** 2
+
+    # 完全衰减区 (smooth_env < knee_width)
+    full_gate = ~hold_gate & (smooth_env < knee_width)
+    gain[full_gate] = gain_floor
+
+    # 拐点区 (knee_width ~ threshold): 平方律从 gain_floor 过渡到 1
+    knee_region = ~hold_gate & (smooth_env >= knee_width) & (smooth_env < threshold)
+    if np.any(knee_region):
+        t = (smooth_env[knee_region] - knee_width) / (threshold - knee_width + 1e-10)
+        gain[knee_region] = gain_floor + (1.0 - gain_floor) * (t ** 2)
 
     return (audio * gain).astype(np.float32)
 

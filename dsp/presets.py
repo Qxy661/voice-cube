@@ -153,17 +153,24 @@ DSP_PRESETS = {
 
 # ==================== 进阶区：AI 模仿特定人物 ====================
 AI_PRESETS = {
+    "woman_1": {
+        "name": "通用女声",
+        "icon": "👩",
+        "description": "通用女声音色 (RVC ONNX 推理)",
+        "category": "ai",
+        "model_path": "assets/models/woman_1.onnx",
+    },
     "kobe": {
         "name": "科比",
         "icon": "🏀",
-        "description": "科比·布莱恩特的标志性嗓音",
+        "description": "科比·布莱恩特的标志性嗓音 (DSP 模拟)",
         "category": "ai",
         "model_path": "assets/models/kobe.pth",
     },
     "spongebob": {
         "name": "海绵宝宝",
         "icon": "🧽",
-        "description": "海绵宝宝的经典尖细声",
+        "description": "海绵宝宝的经典尖细声 (DSP 模拟)",
         "category": "ai",
         "model_path": "assets/models/spongebob.pth",
     },

@@ -10,7 +10,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
     SAMPLE_RATE, REVERB_DELAYS_SEC, REVERB_GAINS, ALLPASS_DELAYS_SEC, ALLPASS_GAIN,
-    TARGET_LUFS, EQ_CROSSOVER_LOW, EQ_CROSSOVER_HIGH,
+    TARGET_LUFS, LOUDNESS_GATE, EQ_CROSSOVER_LOW, EQ_CROSSOVER_HIGH,
 )
 
 
@@ -126,14 +126,20 @@ def apply_reverb(audio: np.ndarray, sr: int, wet: float = 0.3) -> np.ndarray:
 
 
 def normalize_loudness(audio: np.ndarray, sr: int,
-                       target_lufs: float = TARGET_LUFS) -> np.ndarray:
+                       target_lufs: float = TARGET_LUFS,
+                       gate_threshold_db: float = LOUDNESS_GATE) -> np.ndarray:
     """
-    LUFS 响度归一化 — 简化 ITU-R BS.1770
+    LUFS 响度归一化 (v5): 块级门控 + 增益插值
+
+    改进: 静音块不放大 (gain=1.0)，仅对高于 gate_threshold 的块做增益调整。
+    相邻块增益线性插值，消除块边界跳变。
+
+    原版 (v4) 使用全局增益放大所有块，导致静音段噪声底被等比例放大。
     """
     if len(audio) < sr * 0.1:
         return audio
 
-    # K-weighting 近似
+    # K-weighting 近似 (ITU-R BS.1770)
     b_shelf, a_shelf = _high_shelf_coeffs(1681.974450955533, 3.999843853973347, sr, Q=0.7075504)
     audio_kw = lfilter(b_shelf, a_shelf, audio.astype(np.float64))
     sos_hp = butter(2, 38.13547087602444 / (sr/2), btype='high', output='sos')
@@ -144,30 +150,29 @@ def normalize_loudness(audio: np.ndarray, sr: int,
     hop = block_len // 4
     n_blocks = max(1, (len(audio_kw) - block_len) // hop)
 
-    block_loudness = []
+    # 每块的增益: 低于门限的块 gain=1.0 (不放大)
+    block_gains = np.ones(n_blocks)
     for i in range(n_blocks):
         start = i * hop
         block = audio_kw[start:start + block_len]
         mean_sq = np.mean(block ** 2)
         if mean_sq > 0:
-            block_loudness.append(-0.691 + 10 * np.log10(mean_sq + 1e-20))
+            block_lufs = -0.691 + 10 * np.log10(mean_sq + 1e-20)
+            if block_lufs > gate_threshold_db:
+                block_gains[i] = 10 ** ((target_lufs - block_lufs) / 20.0)
 
-    if not block_loudness:
-        return audio
+    # 块增益线性插值到样本级
+    gain_env = np.zeros(len(audio))
+    for i in range(n_blocks - 1):
+        start = i * hop
+        end = min((i + 1) * hop, len(audio))
+        n_seg = end - start
+        if n_seg > 0:
+            gain_env[start:end] = np.linspace(block_gains[i], block_gains[i + 1], n_seg)
+    start = (n_blocks - 1) * hop
+    gain_env[start:] = block_gains[-1]
 
-    block_loudness = np.array(block_loudness)
-    above_gate = block_loudness > -70
-    if np.sum(above_gate) == 0:
-        return audio
-
-    integrated = -0.691 + 10 * np.log10(
-        np.mean(10 ** ((block_loudness[above_gate] + 0.691) / 10)) + 1e-20
-    )
-
-    gain_db = target_lufs - integrated
-    gain = 10 ** (gain_db / 20.0)
-
-    output = audio * gain
+    output = audio * gain_env
 
     # 防止削波
     max_val = np.max(np.abs(output))

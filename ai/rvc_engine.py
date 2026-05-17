@@ -1,132 +1,414 @@
 """
-声纹魔方 - RVC 音色克隆引擎封装 (v6)
+声纹魔方 - RVC 音色克隆引擎封装 (v7)
 
-处理流水线:
-  原声 → DSP降噪 → DSP基频提取 → RVC音色重构 → DSP混响润色 → 成品
+双模式:
+  1. ONNX 推理: 需要 .onnx 模型文件 (含 contentvec + VITS 解码器)
+  2. DSP 模拟: 无模型时的源-滤波回退
 
-v6: 精简模拟管线(仅formant+pitch+reverb)，修复44100Hz适配
+处理流水线 (ONNX 模式):
+  原声(16kHz) → HPF 48Hz → reflect pad → contentvec特征
+  + F0提取 → mel-scale coarse pitch + fine pitch
+  + 随机噪声
+  → ONNX decoder → trim pad → 重采样回 sr → 成品
+
+v7: 补齐 ONNX 推理管线 (原来 _infer_rvc 是空壳)
 """
 
 import numpy as np
 import os
 import logging
+import librosa
+from scipy.signal import butter, sosfilt
 
 logger = logging.getLogger(__name__)
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import (
+    SAMPLE_RATE, MODELS_DIR,
+    RVC_SAMPLE_RATE, RVC_HOP_LENGTH, RVC_PAD_SEC, RVC_F0_MIN, RVC_F0_MAX,
+)
 
 
 class RVCEngine:
     """
     RVC 语音克隆引擎
 
-    封装 RVC (Retrieval-based Voice Conversion) 的推理流程
-    支持加载预训练模型和自定义模型
+    封装 RVC (Retrieval-based Voice Conversion) 的 ONNX 推理流程。
+    支持加载 .onnx 模型进行实时变声, 无模型时回退到 DSP 模拟。
     """
 
-    def __init__(self, models_dir: str = "assets/models"):
-        self.models_dir = models_dir
-        self.current_model = None
+    def __init__(self, models_dir: str = None):
+        self.models_dir = models_dir or MODELS_DIR
+        self.current_model = None  # 用于 DSP 模拟的角色参数标记
         self.current_model_name = None
         self._device = "cpu"
         self._rvc_available = False
+        self._ort = None
+        self._ort_available = False
+        self._session = None  # ONNX Runtime InferenceSession (RVC decoder)
+        self._vec_session = None  # ContentVec model session (feature extractor)
 
+        # 检查 PyTorch
         try:
             import torch
             self._device = "cuda" if torch.cuda.is_available() else "cpu"
             self._torch = torch
             self._rvc_available = True
-            logger.info(f"RVC 引擎初始化成功，设备: {self._device}")
+            logger.info(f"PyTorch 可用, 设备: {self._device}")
         except ImportError:
-            logger.warning("PyTorch 未安装，RVC 功能将使用模拟模式")
+            logger.warning("PyTorch 未安装")
             self._torch = None
 
+        # 检查 ONNX Runtime
+        try:
+            import onnxruntime as ort
+            self._ort = ort
+            self._ort_available = True
+            logger.info(f"ONNX Runtime 可用 ({ort.__version__})")
+        except ImportError:
+            logger.warning("onnxruntime 未安装, RVC ONNX 推理不可用")
+
+    # ─── 模型管理 ────────────────────────────────────────────
+
     def list_models(self) -> list:
-        """列出所有可用的预训练模型"""
+        """列出 assets/models/ 下所有可用模型文件"""
         models = []
         if os.path.exists(self.models_dir):
-            for f in os.listdir(self.models_dir):
+            for f in sorted(os.listdir(self.models_dir)):
                 if f.endswith((".pth", ".onnx")):
                     models.append({
                         "name": os.path.splitext(f)[0],
                         "path": os.path.join(self.models_dir, f),
                         "size": os.path.getsize(os.path.join(self.models_dir, f)),
+                        "type": "ONNX" if f.endswith(".onnx") else "PyTorch",
                     })
         return models
 
     def load_model(self, model_name: str) -> bool:
-        """加载指定的 RVC 模型"""
+        """
+        加载 RVC 模型。
+
+        优先级:
+          1. 直接路径 (model_name 是完整文件路径)
+          2. assets/models/{name}.onnx
+          3. assets/models/{name}.pth  (仅记录, 不支持 torch.load 推理)
+
+        无可用模型 → 标记角色参数用于 DSP 模拟回退。
+        """
+        self.current_model_name = model_name
+
+        # 情况 A: 直接路径
         if os.path.exists(model_name):
             model_path = model_name
         else:
-            model_path = os.path.join(self.models_dir, f"{model_name}.pth")
+            # 情况 B: assets/models/
+            model_path = os.path.join(self.models_dir, f"{model_name}.onnx")
             if not os.path.exists(model_path):
-                model_path = os.path.join(self.models_dir, f"{model_name}.onnx")
+                model_path = os.path.join(self.models_dir, f"{model_name}.pth")
 
         if not os.path.exists(model_path):
-            logger.warning(f"模型文件不存在: {model_path}，使用模拟模式")
-            self.current_model_name = model_name
+            logger.warning(
+                f"模型文件不存在: {model_path}\n"
+                f"  回退到 DSP 模拟模式。\n"
+                f"  如需真实 RVC 推理, 请将 .onnx 模型放入 {self.models_dir}/"
+            )
+            self.current_model = {"mode": "simulate", "role": model_name}
             return True
 
-        try:
-            if self._rvc_available:
-                logger.info(f"加载模型: {model_path}")
-                self.current_model = {"path": model_path, "loaded": True}
-                self.current_model_name = model_name
+        # 尝试加载 ONNX
+        if model_path.endswith(".onnx") and self._ort_available:
+            try:
+                providers = ["CPUExecutionProvider"]
+                if self._device == "cuda":
+                    try:
+                        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+                    except Exception:
+                        pass
+                self._session = self._ort.InferenceSession(
+                    model_path, providers=providers,
+                )
+                logger.info(f"ONNX 模型加载成功: {model_path}")
+                logger.info(f"  输入: {[inp.name + str(inp.shape) for inp in self._session.get_inputs()]}")
+                logger.info(f"  输出: {[out.name + str(out.shape) for out in self._session.get_outputs()]}")
+
+                # 尝试加载 ContentVec 特征提取模型 (同目录下)
+                self._load_vec_model()
+
+                self.current_model = {"mode": "onnx", "path": model_path}
                 return True
-            else:
-                self.current_model_name = model_name
-                return True
-        except Exception as e:
-            logger.error(f"模型加载失败: {e}")
-            return False
+            except Exception as e:
+                logger.error(f"ONNX 模型加载失败: {e}, 回退到 DSP 模拟")
+
+        # .pth 文件或加载失败 → DSP 模拟
+        logger.info(f"使用 DSP 模拟回退 (角色: {model_name})")
+        self.current_model = {"mode": "simulate", "role": model_name, "path": model_path}
+        return True
+
+    # ─── 主推理入口 ──────────────────────────────────────────
 
     def infer(self, audio: np.ndarray, sr: int, f0: np.ndarray = None) -> np.ndarray:
-        """RVC 推理：将输入音频转换为目标音色"""
+        """RVC 推理入口: 自动选择 ONNX 或 DSP 模拟"""
         if f0 is None:
             from dsp.pitch_extract import extract_f0
             f0 = extract_f0(audio, sr)
 
-        if self._rvc_available and self.current_model is not None:
+        if self._session is not None and self.current_model and self.current_model.get("mode") == "onnx":
             return self._infer_rvc(audio, sr, f0)
         else:
             return self._infer_simulate(audio, sr, f0)
 
+    def _load_vec_model(self):
+        """
+        加载 ContentVec 特征提取模型 (vec-256-layer-9.onnx)。
+
+        用于从音频波形提取语义特征 (phone tensor) 供 RVC decoder 使用。
+        在同目录下查找 vec-256-layer-9.onnx 或 contentvec.onnx。
+        """
+        for name in ["vec-256-layer-9.onnx", "contentvec.onnx", "hubert_base.onnx"]:
+            path = os.path.join(self.models_dir, name)
+            if os.path.exists(path):
+                try:
+                    self._vec_session = self._ort.InferenceSession(
+                        path, providers=["CPUExecutionProvider"],
+                    )
+                    logger.info(f"ContentVec 模型加载成功: {path}")
+                    inp_name = self._vec_session.get_inputs()[0].name
+                    out_shape = self._vec_session.get_outputs()[0].shape
+                    logger.info(f"  输入: {inp_name}, 输出: {out_shape}")
+                    return
+                except Exception as e:
+                    logger.warning(f"ContentVec 加载失败 ({name}): {e}")
+
+        logger.info("ContentVec 模型未找到, 使用 DSP 模拟代替 RVC ONNX 推理")
+
+    # ─── ONNX 推理 (真实 RVC) ─────────────────────────────
+
     def _infer_rvc(self, audio: np.ndarray, sr: int, f0: np.ndarray) -> np.ndarray:
-        """实际 RVC 推理"""
+        """ONNX RVC 推理管线"""
         try:
-            import torch
-            logger.info(f"RVC 推理中... 模型: {self.current_model_name}")
-            return self._infer_simulate(audio, sr, f0)
+            # Step 1: 重采样到 16000 Hz (HuBERT 输入采样率)
+            if sr != RVC_SAMPLE_RATE:
+                audio_16k = librosa.resample(
+                    audio.astype(np.float32), orig_sr=sr, target_sr=RVC_SAMPLE_RATE,
+                )
+            else:
+                audio_16k = audio.astype(np.float32).copy()
+
+            # Step 2: 高通滤波 48 Hz (去亚低频)
+            sos = butter(5, 48.0 / (RVC_SAMPLE_RATE / 2), btype="high", output="sos")
+            audio_16k = sosfilt(sos, audio_16k).astype(np.float32)
+
+            # Step 3: 反射填充 (边缘伪影抑制)
+            pad_len = int(RVC_SAMPLE_RATE * RVC_PAD_SEC)
+            audio_pad = np.pad(audio_16k, pad_len, mode="reflect")
+
+            # Step 4: 获取 ONNX 模型输入名 -> 构建输入字典
+            input_meta = {inp.name: inp for inp in self._session.get_inputs()}
+            inputs = {}
+
+            for name, meta in input_meta.items():
+                shape = meta.shape  # 可能包含动态轴 (None 或 "T")
+                dtype = meta.type
+
+                if name == "phone":
+                    # contentvec 特征: (1, T, C)
+                    # 需要 hubert/contentvec ONNX 模型单独跑
+                    # 这里从 RVC 模型自身尝试获取（如果模型包含 content encoder）
+                    inputs[name] = self._extract_content_features(audio_pad)
+                    if inputs[name] is None:
+                        logger.warning("contentvec 特征提取失败, 回退 DSP 模拟")
+                        return self._infer_simulate(audio, sr, f0)
+
+                elif name == "pitch":
+                    # coarse pitch: (1, T), int64, mel-scale 1~255
+                    pitch_int, pitch_f = self._f0_to_pitch(f0, sr, audio_pad.shape[0], inputs.get("phone"))
+                    inputs[name] = pitch_int
+
+                elif name == "pitchf":
+                    if "pitch_f" in locals():
+                        inputs[name] = pitch_f
+                    else:
+                        _, pitch_f = self._f0_to_pitch(f0, sr, audio_pad.shape[0], inputs.get("phone"))
+                        inputs[name] = pitch_f
+
+                elif name == "phone_lengths":
+                    T = inputs.get("phone", np.zeros((1, 1, 256))).shape[1]
+                    inputs[name] = np.array([T], dtype=np.int64)
+
+                elif name == "ds":
+                    # speaker ID, 单 speaker 模型恒为 0
+                    inputs[name] = np.array([0], dtype=np.int64)
+
+                elif name == "rnd":
+                    # 随机噪声: (1, 192, T)
+                    T = inputs.get("phone", np.zeros((1, 1, 256))).shape[1]
+                    rnd = np.random.RandomState(0).randn(1, 192, T).astype(np.float32)
+                    inputs[name] = rnd
+
+                elif name == "audio":
+                    # 少数模型直接接受原始音频
+                    inputs[name] = audio_pad[np.newaxis, :].astype(np.float32)
+
+                else:
+                    # 未知输入 -> 尝试猜测
+                    if np.prod(shape) == 1 and dtype.startswith("int"):
+                        inputs[name] = np.array([0], dtype=np.int64)
+                    elif np.prod(shape) == 1 and dtype.startswith("float"):
+                        inputs[name] = np.array([0.0], dtype=np.float32)
+                    else:
+                        logger.warning(f"未知 ONNX 输入: {name} {shape}, 跳过")
+                        continue
+
+            # Step 5: ONNX 推理
+            output_names = [out.name for out in self._session.get_outputs()]
+            results = self._session.run(output_names, inputs)
+            audio_out = results[0]  # (1, n_samples) float32
+
+            # Step 6: 后处理 — 裁剪填充 + 重采样回原 sr
+            out_16k = audio_out[0, pad_len:-pad_len] if audio_out.shape[1] > pad_len * 2 else audio_out[0]
+            if sr != RVC_SAMPLE_RATE:
+                out_final = librosa.resample(
+                    out_16k, orig_sr=RVC_SAMPLE_RATE, target_sr=sr,
+                )
+            else:
+                out_final = out_16k
+
+            # 对齐长度
+            target_len = len(audio)
+            if len(out_final) > target_len:
+                out_final = out_final[:target_len]
+            elif len(out_final) < target_len:
+                out_final = np.pad(out_final, (0, target_len - len(out_final)))
+
+            logger.info(f"RVC ONNX 推理完成 ({len(out_final)} samples)")
+            return out_final.astype(np.float32)
+
         except Exception as e:
-            logger.error(f"RVC 推理失败: {e}")
+            logger.error(f"RVC ONNX 推理失败: {e}, 回退 DSP 模拟")
             return self._infer_simulate(audio, sr, f0)
+
+    def _extract_content_features(self, audio_16k: np.ndarray) -> np.ndarray:
+        """
+        从 ContentVec/ContentVec ONNX 模型提取语义特征 (phone tensor)。
+
+        策略:
+          A. 使用已缓存的 self._vec_session
+          B. 尝试加载 vec-256-layer-9.onnx / contentvec.onnx
+          C. 如果 RVC 模型自身有 audio 输入 (content encoder 已 trace in) → 跳过
+
+        音频输入应为 16kHz mono float32。
+        """
+        # 策略 A: 已缓存的 vec session
+        session = self._vec_session
+        if session is None:
+            # 策略 B: 动态加载并缓存
+            for name in ["vec-256-layer-9.onnx", "contentvec.onnx", "hubert_base.onnx"]:
+                path = os.path.join(self.models_dir, name)
+                if os.path.exists(path):
+                    try:
+                        session = self._ort.InferenceSession(
+                            path, providers=["CPUExecutionProvider"],
+                        )
+                        self._vec_session = session
+                        logger.info(f"ContentVec 动态加载成功: {path}")
+                        break
+                    except Exception as e:
+                        logger.warning(f"加载 {name} 失败: {e}")
+
+        if session is not None:
+            try:
+                input_name = session.get_inputs()[0].name
+                input_shape = session.get_inputs()[0].shape
+                # 构造输入: contentvec 期望 (1, T_audio) 或 (1, T, dim)
+                if input_shape and len(input_shape) == 3:
+                    audio_input = audio_16k[np.newaxis, :, np.newaxis].astype(np.float32)
+                else:
+                    audio_input = audio_16k[np.newaxis, :].astype(np.float32)
+                features = session.run(None, {input_name: audio_input})[0]
+                logger.info(f"ContentVec 特征提取成功: {features.shape}")
+                return features.astype(np.float32)
+            except Exception as e:
+                logger.warning(f"ContentVec 推理失败: {e}")
+                self._vec_session = None
+
+        logger.warning(
+            "ContentVec 模型未找到 (vec-256-layer-9.onnx / contentvec.onnx)。\n"
+            f"  请运行: python scripts/download_rvc_models.py\n"
+            f"  或将 .onnx 模型放入 {self.models_dir}/\n"
+            f"  回退到 DSP 模拟模式。"
+        )
+        return None
+
+    def _f0_to_pitch(self, f0: np.ndarray, sr: int, target_samples: int, phone: np.ndarray = None) -> tuple:
+        """
+        F0 → coarse pitch (mel-scale 1~255) + fine pitch (Hz)
+
+        phone 用于确定帧数 T, 否则从 target_samples 按 RVC_HOP_LENGTH 计算。
+        """
+        if phone is not None:
+            T = phone.shape[1]
+        else:
+            T = max(1, target_samples // RVC_HOP_LENGTH)
+
+        # 将 f0 重采样到 RVC 帧率
+        n_f0_frames = len(f0)
+
+        # F0 帧对齐
+        if n_f0_frames != T:
+            x_old = np.linspace(0, 1, n_f0_frames)
+            x_new = np.linspace(0, 1, T)
+            f0_aligned = np.interp(x_new, x_old, f0)
+        else:
+            f0_aligned = f0.copy()
+
+        # mel-scale coarse pitch
+        f0_mel_min = 1127.0 * np.log1p(RVC_F0_MIN / 700.0)
+        f0_mel_max = 1127.0 * np.log1p(RVC_F0_MAX / 700.0)
+        f0_clipped = np.clip(f0_aligned, RVC_F0_MIN, RVC_F0_MAX)
+        f0_mel = 1127.0 * np.log1p(f0_clipped / 700.0)
+        pitch_int = np.clip(
+            np.round((f0_mel - f0_mel_min) / (f0_mel_max - f0_mel_min) * 254 + 1),
+            1, 255,
+        ).astype(np.int64)
+        pitch_int[f0_aligned <= 1] = 1  # 静音帧 → 1
+
+        pitch_tensor = pitch_int[np.newaxis, :]  # (1, T)
+        pitchf_tensor = f0_aligned[np.newaxis, :].astype(np.float32)  # (1, T)
+
+        return pitch_tensor, pitchf_tensor
+
+    # ─── DSP 模拟回退 ─────────────────────────────────────
 
     def _infer_simulate(self, audio: np.ndarray, sr: int, f0: np.ndarray) -> np.ndarray:
         """
-        模拟推理模式 (v7): 源-滤波语音转换模拟
+        DSP 模拟推理 (v7): 源-滤波语音转换模拟
 
-        基于开源变声器通行做法的简化的源-滤波模型:
+        基于开源变声器的源-滤波模型:
           1. STFT → 倒谱包络 (声道滤波) + 精细结构 (声源激励)
           2. 声道滤波按目标角色扭曲/调整
           3. 声源激励变调到目标基频
-          4. 重合成 → 混响润色
+          4. 重合成 + 混响润色
 
-        修正 v6 的 formant 方向错误: ratio > 1.0 = 共振峰上移(明亮/小体型)
+        角色特化参数表定义每个角色的 formant/pitch/reverb/EQ 组合。
         """
         from dsp.pitch_shift import pitch_shift
         from dsp.effects import comb_reverb, noise_gate
+        from dsp.formant_shift import formant_shift
+        from dsp.postprocessor import parametric_eq, normalize_loudness
 
         # 角色特化参数 (v7: 修正 formant 方向)
         model_effects = {
             "kobe": {
-                "formant": 0.88,         # 压低共振峰 → 深沉宽厚
-                "pitch": -3,              # 降低音高 → 成熟感
+                "formant": 0.88,
+                "pitch": -3,
                 "reverb": 0.25,
-                "bass_boost": 4,          # 低频增强 → 温暖
-                "treble_boost": -2,       # 高频衰减 → 柔和
+                "bass_boost": 4,
+                "treble_boost": -2,
             },
             "spongebob": {
-                "formant": 1.35,          # 抬高共振峰 → 明亮卡通
-                "pitch": 7,               # 大幅提高音高
+                "formant": 1.35,
+                "pitch": 7,
                 "reverb": 0.1,
                 "bass_boost": -3,
                 "treble_boost": 3,
@@ -145,15 +427,13 @@ class RVCEngine:
         # Step 1: 噪声门控 (抑制静音段)
         output = noise_gate(audio, sr)
 
-        # Step 2: 共振峰移位 (声道滤波改变 → 音色/体型感改变)
-        from dsp.formant_shift import formant_shift
+        # Step 2: 共振峰移位 (声道滤波改变 → 音色/体型感)
         if effects["formant"] != 1.0:
             output = formant_shift(output, sr, effects["formant"])
         else:
             output = output.copy()
 
-        # Step 3: 目标角色 EQ 塑形 (增强/减弱特定频段模拟角色音色特征)
-        from dsp.postprocessor import parametric_eq
+        # Step 3: 角色 EQ 塑形
         output = parametric_eq(output, sr,
                                bass_boost=effects.get("bass_boost", 0),
                                treble_boost=effects.get("treble_boost", 0))
@@ -174,14 +454,30 @@ class RVCEngine:
             gain = min(rms_in / rms_out * 1.1, 3.0)
             output = output * gain
 
+        # Step 7: LUFS 响度归一化 (块级门控, 不放大静音段)
+        output = normalize_loudness(output, sr)
+
         return output.astype(np.float32)
 
+    # ─── 模型信息 ──────────────────────────────────────────
+
     def get_model_info(self) -> dict:
-        """获取当前模型信息"""
+        """获取当前模型信息 (用于 UI 显示)"""
+        available_models = self.list_models()
+        mode = "DSP模拟"
+        if self._session is not None:
+            mode = "RVC (ONNX)"
+        elif self.current_model and self.current_model.get("mode") == "simulate":
+            mode = "DSP模拟"
+
         return {
             "name": self.current_model_name,
             "loaded": self.current_model is not None,
             "device": self._device,
             "rvc_available": self._rvc_available,
-            "mode": "RVC" if self._rvc_available and self.current_model else "DSP模拟",
+            "onnx_available": self._ort_available,
+            "mode": mode,
+            "model_file": self.current_model.get("path") if self.current_model else None,
+            "available_models": [m["name"] + "." + ("onnx" if m["type"] == "ONNX" else "pth")
+                                 for m in available_models],
         }

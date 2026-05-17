@@ -42,14 +42,14 @@ desktop.ini
 *.tmp
 temp_*.wav
 
-# Model weights (太大不提交)
+# Model weights (git-lfs 管理大文件)
 assets/models/*.pth
-assets/models/*.onnx
 assets/models/*.bin
 
 # Logs
 *.log
 logs/
+tests/diagnose_output/
 
 # Jupyter
 .ipynb_checkpoints/

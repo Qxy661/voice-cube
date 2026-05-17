@@ -366,6 +366,92 @@ def test_sample_rate():
 
 
 # ════════════════════════════════════════════════════════════════════
+#  v7 新增测试
+# ════════════════════════════════════════════════════════════════════
+
+def test_noise_gate_enhanced():
+    """测试增强噪声门 (effects.py): 验证深度衰减 + 平滑RMS插值"""
+    from dsp.effects import noise_gate
+
+    # 纯静音: 应被深度衰减到 -60dB 以下
+    silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
+    np.random.seed(42)
+    noise_floor = (np.random.randn(SAMPLE_RATE) * 0.001).astype(np.float32)  # -60dB noise
+    noisy_silence = silence + noise_floor
+
+    gated = noise_gate(noisy_silence, sr=SAMPLE_RATE)
+    assert len(gated) == len(noisy_silence)
+    assert np.all(np.isfinite(gated))
+
+    rms_gated = np.sqrt(np.mean(gated ** 2))
+    rms_in = np.sqrt(np.mean(noisy_silence ** 2))
+    assert rms_gated < rms_in, "增强噪声门应降低噪声底"
+    assert rms_gated < 0.001, f"静音段RMS应 < 0.001, 实际: {rms_gated}"
+
+    # 混音信号: 语音 + 噪声
+    signal = generate_test_audio(1.0, 440.0) * 0.5
+    combined = np.concatenate([noisy_silence[:SAMPLE_RATE // 2], signal])
+
+    gated2 = noise_gate(combined, sr=SAMPLE_RATE)
+    assert np.all(np.isfinite(gated2))
+
+    # 前半静音段应被衰减
+    half = SAMPLE_RATE // 2
+    silence_rms = np.sqrt(np.mean(gated2[:half] ** 2))
+    signal_rms = np.sqrt(np.mean(gated2[half:] ** 2))
+    assert silence_rms < signal_rms * 0.1, "静音段衰减不足"
+
+    print("[PASS] noise_gate_enhanced")
+
+
+def test_vad_skip():
+    """测试 formant_shift VAD 跳过静音帧: 静音帧不应被扭曲"""
+    from dsp.formant_shift import formant_shift
+
+    # 前半静音 + 后半语音
+    silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
+    signal = generate_test_audio(1.0, 440.0) * 0.5
+    combined = np.concatenate([silence, signal])
+
+    shifted = formant_shift(combined, SAMPLE_RATE, ratio=1.3)
+    assert len(shifted) == len(combined)
+    assert np.all(np.isfinite(shifted))
+
+    # 前半静音段应保持接近 0
+    half = SAMPLE_RATE // 2
+    silence_rms_out = np.sqrt(np.mean(shifted[:half] ** 2))
+    assert silence_rms_out < 0.01, f"静音段被扭曲产生伪影: RMS={silence_rms_out}"
+
+    # 非静音段应有变化
+    assert not np.allclose(shifted[half:], combined[half:], atol=0.001), "语音段应有共振峰变化"
+
+    print("[PASS] vad_skip")
+
+
+def test_pre_emphasis_de_emphasis():
+    """测试预加重/去加重正确性"""
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    from app import _pre_emphasis, _de_emphasis
+
+    audio = generate_test_audio(1.0, 440.0)
+
+    # 预加重应增强高频
+    emphasized = _pre_emphasis(audio)
+    assert len(emphasized) == len(audio)
+    assert np.all(np.isfinite(emphasized))
+
+    # 预加重 + 去加重 ≈ 原信号
+    restored = _de_emphasis(emphasized)
+    rms_diff = np.sqrt(np.mean((restored - audio) ** 2))
+    assert rms_diff < 0.01, f"pre-emphasis + de-emphasis 应恢复原信号, RMS error: {rms_diff}"
+
+    # 预加重后信号不应削波
+    assert np.max(np.abs(emphasized)) < 1.0, "预加重不应导致削波"
+
+    print("[PASS] pre_emphasis_de_emphasis")
+
+
+# ════════════════════════════════════════════════════════════════════
 #  运行所有测试
 # ════════════════════════════════════════════════════════════════════
 
@@ -397,6 +483,11 @@ if __name__ == "__main__":
     test_recorder()
     test_sample_rate()
 
+    # v7 新增测试
+    test_noise_gate_enhanced()
+    test_vad_skip()
+    test_pre_emphasis_de_emphasis()
+
     print("=" * 50)
-    print(f"所有 {18} 个测试通过!")
+    print("所有 21 个测试通过!")
     print("=" * 50)
