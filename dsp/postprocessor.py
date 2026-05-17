@@ -69,6 +69,11 @@ def parametric_eq(
         b, a = _high_shelf_coeffs(EQ_CROSSOVER_HIGH, treble_boost, sr)
         output = lfilter(b, a, output)
 
+    # 防极端 EQ 过冲 (高增益搁架滤波可能产生瞬态峰值)
+    max_val = np.max(np.abs(output))
+    if max_val > 0.99:
+        output = output * (0.99 / max_val)
+
     return output.astype(np.float32)
 
 

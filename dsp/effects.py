@@ -87,6 +87,11 @@ def comb_reverb(audio: np.ndarray, sr: int, decay: float = 0.5) -> np.ndarray:
     dry = 1.0 - wet * 0.4
     output = dry * audio_f + wet * result
 
+    # 防混响过冲
+    max_val = np.max(np.abs(output))
+    if max_val > 0.99:
+        output = output * 0.99 / max_val
+
     return output.astype(np.float32)
 
 

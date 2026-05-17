@@ -180,10 +180,10 @@ def test_formant_shift():
         if not ok: all_pass = False
         print_measure(m)
 
-    # LPC模式 (|ratio-1| >= 0.20)
-    lpc_ratios = [0.8, 0.7, 0.5, 1.2, 1.3, 1.5, 2.0]
-    print("  [LPC模式]")
-    for r in lpc_ratios:
+    # STFT模式 (|ratio-1| >= 0.10, v8主力)
+    stft_ratios = [0.8, 0.7, 0.5, 1.2, 1.3, 1.5, 2.0]
+    print("  [STFT模式]")
+    for r in stft_ratios:
         out = formant_shift(audio, SAMPLE_RATE, r)
         m = measure(out, f"ratio={r:.2f}")
         ok, reason = check(m)
@@ -203,10 +203,10 @@ def test_formant_shift():
         diff = np.diff(out)
         md = np.max(np.abs(diff))
         if md > 0.5:
-            print(f"  {WARN} LPC ratio={r:.1f} max_diff={md:.4f}")
+            print(f"  {WARN} STFT ratio={r:.1f} max_diff={md:.4f}")
             _save_wav(out, SAMPLE_RATE, f"formant_click_check_r{r}")
         else:
-            print(f"  {OK} LPC ratio={r:.1f} 连续 max_diff={md:.4f}")
+            print(f"  {OK} STFT ratio={r:.1f} 连续 max_diff={md:.4f}")
 
     return all_pass
 
