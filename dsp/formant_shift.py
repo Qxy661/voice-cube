@@ -1,10 +1,10 @@
 """
-声纹魔方 - LPC 共振峰移位引擎 (v5)
-改进: 清浊音检测, 仅处理浊音帧, LPC-46 @44100Hz
+声纹魔方 - LPC 共振峰移位引擎 (v6)
+双模式: 小变化用EQ近似 (干净), 大变化用LPC (精确)
 """
 
 import numpy as np
-from scipy.signal import lfilter
+from scipy.signal import lfilter, butter, sosfilt
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -12,39 +12,20 @@ from config import SAMPLE_RATE, LPC_ORDER, LPC_PRE_EMPHASIS, HOP_LENGTH
 
 
 def _lpc(signal: np.ndarray, order: int, pre_emphasis: float = 0.0) -> np.ndarray:
-    """
-    手动实现 LPC 系数计算
-
-    Parameters
-    ----------
-    signal : np.ndarray
-        输入信号帧
-    order : int
-        LPC 阶数
-    pre_emphasis : float
-        预加重系数
-
-    Returns
-    -------
-    np.ndarray
-        LPC 系数 (首元素为 1.0)
-    """
+    """手动实现 LPC 系数计算"""
     n = len(signal)
     if n <= order:
         return np.concatenate(([1.0], np.zeros(order)))
 
-    # 预加重
     if pre_emphasis > 0:
         signal = np.append(signal[0], signal[1:] - pre_emphasis * signal[:-1])
 
-    # 自相关
     r = np.correlate(signal, signal, mode="full")
     r = r[n - 1:]
 
     if r[0] < 1e-10:
         return np.concatenate(([1.0], np.zeros(order)))
 
-    # Levinson-Durbin
     a = np.zeros(order + 1)
     a[0] = 1.0
     e = r[0]
@@ -73,21 +54,45 @@ def _lpc(signal: np.ndarray, order: int, pre_emphasis: float = 0.0) -> np.ndarra
     return a
 
 
-def _detect_voiced_frames(audio: np.ndarray, sr: int, frame_len: int, hop: int) -> np.ndarray:
+def _formant_eq_approximation(audio: np.ndarray, ratio: float) -> np.ndarray:
     """
-    清浊音检测：计算每帧 RMS 和过零率，标记浊音帧
+    EQ 近似共振峰变化 (v6 新增)
+    对微小比例变化使用双二阶倾斜滤波替代 LPC 重合成
 
-    返回
-    -------
-    np.ndarray (bool)
-        True = 浊音帧（需要共振峰处理）
+    ratio > 1.0 = 提升高频 (更亮/更小体型感)
+    ratio < 1.0 = 衰减高频 (更暗/更大体型感)
     """
+    sr = SAMPLE_RATE
+
+    # 将 ratio 映射为 dB 倾斜量
+    # ratio 1.05 → 约 +0.75 dB tilt (轻微更亮)
+    # ratio 1.20 → 约 +3.0 dB tilt (明显更亮)
+    # ratio 0.85 → 约 -2.5 dB tilt (明显更暗)
+    tilt_db = (ratio - 1.0) * 15.0
+
+    if abs(tilt_db) < 0.5:
+        return audio.copy()
+
+    # 设计一阶倾斜滤波器: y[n] = x[n] + k * (x[n] - x[n-1])
+    # k > 0 提升高频, k < 0 衰减高频
+    k = tilt_db / 60.0  # 映射系数
+    k = np.clip(k, -0.8, 0.8)
+
+    output = np.zeros_like(audio, dtype=np.float64)
+    output[0] = audio[0]
+    for i in range(1, len(audio)):
+        output[i] = audio[i] + k * (audio[i] - audio[i - 1])
+
+    return output.astype(np.float32)
+
+
+def _detect_voiced_frames(audio: np.ndarray, sr: int, frame_len: int, hop: int) -> np.ndarray:
+    """清浊音检测：RMS + 过零率"""
     n_frames = 1 + (len(audio) - frame_len) // hop
     voiced = np.zeros(n_frames, dtype=bool)
 
-    # 全局 RMS 用于自适应阈值
     global_rms = np.sqrt(np.mean(audio ** 2))
-    threshold = max(global_rms * 0.3, 0.002)  # 自适应能量阈值
+    threshold = max(global_rms * 0.3, 0.002)
 
     for i in range(n_frames):
         start = i * hop
@@ -97,53 +102,27 @@ def _detect_voiced_frames(audio: np.ndarray, sr: int, frame_len: int, hop: int) 
         if len(frame) < frame_len // 2:
             continue
 
-        # 能量检测
         rms = np.sqrt(np.mean(frame ** 2))
         if rms < threshold:
             continue
 
-        # 过零率检测（浊音过零率低，清音/摩擦音过零率高）
         zcr = np.sum(np.abs(np.diff(np.sign(frame)))) / (2 * len(frame))
-        zcr_threshold = 0.3  # 浊音过零率通常 < 0.2-0.3
-
-        # 浊音条件：有足够能量 + 低过零率
-        voiced[i] = (zcr < zcr_threshold)
+        voiced[i] = (zcr < 0.3)
 
     return voiced
 
 
-def formant_shift(audio: np.ndarray, sr: int, ratio: float,
-                  order: int = LPC_ORDER) -> np.ndarray:
+def _lpc_formant_shift(audio: np.ndarray, ratio: float, order: int) -> np.ndarray:
     """
-    LPC 共振峰移位 (v5): 仅处理浊音帧
-
-    改进:
-      - 清浊音检测，仅对浊音帧做共振峰移位
-      - LPC-46 @44100Hz
-      - 清音/无声帧直接通过，保留自然感
-
-    Parameters
-    ----------
-    audio : np.ndarray
-        输入音频
-    sr : int
-        采样率
-    ratio : float
-        共振峰缩放比例
-    order : int
-        LPC 阶数
+    完整 LPC 共振峰移位 (仅用于极端比例)
+    ratio < 0.85 或 ratio > 1.15
     """
-    if ratio == 1.0:
-        return audio.copy()
-
-    ratio = np.clip(ratio, 0.4, 2.5)
-
+    sr = SAMPLE_RATE
     frame_len = 2048
     hop = HOP_LENGTH
     window = np.hanning(frame_len)
     n_frames = 1 + (len(audio) - frame_len) // hop
 
-    # 清浊音检测
     voiced_flags = _detect_voiced_frames(audio, sr, frame_len, hop)
 
     output = np.zeros(len(audio) + frame_len)
@@ -158,14 +137,12 @@ def formant_shift(audio: np.ndarray, sr: int, ratio: float,
         frame = audio[start:end]
 
         if not voiced_flags[i]:
-            # 清音/无声帧：直通
             output[start:end] += frame * window
             window_sum[start:end] += window ** 2
             continue
 
         windowed = frame * window
 
-        # Step 1: LPC 分析
         try:
             a = _lpc(windowed, order=order, pre_emphasis=LPC_PRE_EMPHASIS)
         except Exception:
@@ -173,7 +150,6 @@ def formant_shift(audio: np.ndarray, sr: int, ratio: float,
             window_sum[start:end] += window ** 2
             continue
 
-        # Step 2: 求根并筛选
         roots = np.roots(a)
         new_roots = []
         used = set()
@@ -206,12 +182,10 @@ def formant_shift(audio: np.ndarray, sr: int, ratio: float,
                 new_roots.append(r)
                 used.add(j)
 
-        # Step 3: 重建 LPC 系数
         new_roots = np.array(new_roots)
         new_a = np.poly(new_roots)
         new_a = np.real(new_a)
 
-        # 稳定性检查
         poles = np.roots(new_a)
         if np.any(np.abs(poles) >= 1.0):
             scale = 0.98 / np.max(np.abs(poles))
@@ -219,19 +193,39 @@ def formant_shift(audio: np.ndarray, sr: int, ratio: float,
             new_a = np.poly(poles)
             new_a = np.real(new_a)
 
-        # Step 4: LPC 合成
         residual = lfilter(a, [1.0], windowed)
         synthesized = lfilter([1.0], new_a, residual)
 
         output[start:end] += synthesized * window
         window_sum[start:end] += window ** 2
 
-    # 归一化窗重叠
     nonzero = window_sum > 1e-8
     output[:len(audio)][nonzero[:len(audio)]] /= window_sum[:len(audio)][nonzero[:len(audio)]]
     output = output[:len(audio)]
 
     return output.astype(np.float32)
+
+
+def formant_shift(audio: np.ndarray, sr: int, ratio: float,
+                  order: int = LPC_ORDER) -> np.ndarray:
+    """
+    共振峰移位 (v6): 双模式策略
+
+    - |ratio-1.0| < 0.15: EQ 倾斜滤波近似 (干净无伪影)
+    - |ratio-1.0| >= 0.15: 完整 LPC 共振峰移位 + 清浊音检测
+    """
+    if ratio == 1.0:
+        return audio.copy()
+
+    ratio = np.clip(ratio, 0.4, 2.5)
+
+    # 判断使用哪种模式
+    if abs(ratio - 1.0) < 0.15:
+        # 模式 A: EQ 近似 (clean, 无 LPC 伪影)
+        return _formant_eq_approximation(audio, ratio)
+    else:
+        # 模式 B: 完整 LPC (极端比例)
+        return _lpc_formant_shift(audio, ratio, order)
 
 
 def extract_formants(audio: np.ndarray, sr: int, order: int = LPC_ORDER) -> list:
@@ -248,7 +242,6 @@ def extract_formants(audio: np.ndarray, sr: int, order: int = LPC_ORDER) -> list
         return []
 
     roots = np.roots(a)
-
     formants = []
     for r in roots:
         if np.abs(r) < 1.0 and np.imag(r) > 0:

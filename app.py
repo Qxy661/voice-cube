@@ -245,10 +245,9 @@ def process_ai_clone(audio_input, clone_target, custom_model_file):
         steps[3]["status"] = "done"
         steps[3]["time"] = f"{time.time()-t0:.2f}s"
 
-        # Step 5: 混响润色 + LUFS
+        # Step 5: LUFS 响度归一化 (RVC引擎内部已含混响)
         t0 = time.time()
         steps[4]["status"] = "active"
-        processed = apply_reverb(processed, sr, wet=0.2)
         processed = normalize_loudness(processed, sr)
         steps[4]["status"] = "done"
         steps[4]["time"] = f"{time.time()-t0:.2f}s"

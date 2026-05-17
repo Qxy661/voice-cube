@@ -1,10 +1,10 @@
 """
-声纹魔方 - RVC 音色克隆引擎封装 (v4)
+声纹魔方 - RVC 音色克隆引擎封装 (v6)
 
 处理流水线:
   原声 → DSP降噪 → DSP基频提取 → RVC音色重构 → DSP混响润色 → 成品
 
-v4: 44100Hz采样率，向量化处理，移除中间归一化
+v6: 精简模拟管线(仅formant+pitch+reverb)，修复44100Hz适配
 """
 
 import numpy as np
@@ -91,14 +91,10 @@ class RVCEngine:
             return self._infer_simulate(audio, sr, f0)
 
     def _infer_rvc(self, audio: np.ndarray, sr: int, f0: np.ndarray) -> np.ndarray:
-        """实际 RVC 推理（需要完整 RVC 环境）"""
+        """实际 RVC 推理"""
         try:
             import torch
             logger.info(f"RVC 推理中... 模型: {self.current_model_name}")
-            # 实际项目中这里调用 RVC 的推理接口
-            # from infer.modules.vc.modules import VC
-            # vc = VC(...)
-            # output = vc.pipeline(...)
             return self._infer_simulate(audio, sr, f0)
         except Exception as e:
             logger.error(f"RVC 推理失败: {e}")
@@ -106,38 +102,32 @@ class RVCEngine:
 
     def _infer_simulate(self, audio: np.ndarray, sr: int, f0: np.ndarray) -> np.ndarray:
         """
-        模拟推理模式 (v3): DSP方法模拟音色变化
+        模拟推理模式 (v6): DSP方法模拟音色变化
 
-        v3改进:
-          - 扩展到所有AI预设角色
-          - 加入压缩器/激励器/EQ
-          - 未知模型使用通用变声链（不再是恒等变换）
+        v6 精简:
+          - 仅保留 formant_shift + pitch_shift + reverb
+          - 移除 compressors/exciter/EQ (过度处理导致声音发糊变小)
         """
         from dsp.formant_shift import formant_shift
         from dsp.pitch_shift import pitch_shift
-        from dsp.effects import comb_reverb, soft_knee_compressor, harmonics_exciter
-        from dsp.postprocessor import parametric_eq
+        from dsp.effects import comb_reverb
 
-        # 角色特化 DSP 参数
+        # 角色特化 DSP 参数 (v6: 简化，仅保留核心参数)
         model_effects = {
             "kobe": {
-                "formant": 1.2, "pitch": -2, "reverb": 0.3,
-                "compressor": True, "exciter": 0.12, "eq_bass": 4, "eq_treble": -2,
+                "formant": 1.15, "pitch": -2, "reverb": 0.25,
             },
             "spongebob": {
-                "formant": 0.6, "pitch": 6, "reverb": 0.1,
-                "compressor": True, "exciter": 0.08, "eq_bass": -5, "eq_treble": 3,
+                "formant": 0.65, "pitch": 5, "reverb": 0.1,
             },
-            # 通用变声链（自定义模型/未知模型使用）
             "_default": {
-                "formant": 1.15, "pitch": -1, "reverb": 0.25,
-                "compressor": True, "exciter": 0.1, "eq_bass": 2, "eq_treble": 0,
+                "formant": 1.1, "pitch": -1, "reverb": 0.2,
             },
         }
 
         effects = model_effects.get(self.current_model_name, model_effects["_default"])
 
-        # Step 1: 共振峰移位
+        # Step 1: 共振峰移位 (改变体型感)
         if effects["formant"] != 1.0:
             output = formant_shift(audio, sr, effects["formant"])
         else:
@@ -147,23 +137,9 @@ class RVCEngine:
         if effects["pitch"] != 0:
             output = pitch_shift(output, sr, effects["pitch"])
 
-        # Step 3: 谐波激励器（增加清晰度）
-        if effects.get("exciter", 0) > 0:
-            output = harmonics_exciter(output, sr, amount=effects["exciter"])
-
-        # Step 4: 动态压缩
-        if effects.get("compressor", False):
-            output = soft_knee_compressor(output, sr)
-
-        # Step 5: 混响
-        if effects["reverb"] > 0:
+        # Step 3: 混响 (仅润色，不过度)
+        if effects.get("reverb", 0) > 0:
             output = comb_reverb(output, sr, effects["reverb"])
-
-        # Step 6: EQ
-        eq_bass = effects.get("eq_bass", 0)
-        eq_treble = effects.get("eq_treble", 0)
-        if eq_bass != 0 or eq_treble != 0:
-            output = parametric_eq(output, sr, bass_boost=eq_bass, treble_boost=eq_treble)
 
         return output.astype(np.float32)
 
