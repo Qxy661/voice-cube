@@ -24,7 +24,7 @@ from dsp.pitch_shift import pitch_shift
 from dsp.formant_shift import formant_shift
 from dsp.effects import (
     ring_modulate, telephone_filter, add_breathiness,
-    comb_filter_metallic,
+    comb_filter_metallic, noise_gate,
 )
 from dsp.preprocessor import spectral_subtraction
 from dsp.pitch_extract import extract_f0
@@ -48,9 +48,12 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
                      pitch_shift_val=None, formant_ratio_val=None,
                      ring_mod_val=None, reverb_val=None,
                      breathiness_val=None) -> tuple:
-    """应用 DSP 预设处理音频 (v4: 精简管线，仅最终归一化)"""
+    """应用 DSP 预设处理音频 (v5: 含噪声门控, 抑制静音段噪声底放大)"""
     if audio is None:
         return None, None
+
+    # 噪声门控: 管线入口抑制静音段噪声底, 防止被后续处理放大
+    audio = noise_gate(audio, sr)
 
     audio = _soft_limiter(audio)
     if sr != SAMPLE_RATE:

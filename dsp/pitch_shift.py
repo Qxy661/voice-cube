@@ -38,25 +38,32 @@ def pitch_shift(audio: np.ndarray, sr: int, semitones: float,
     """
     变调 (v7): 双模式策略
 
-    - |semis| < 6: polyphase resample-only (无相位伪影，无振铃，语音清晰度最佳)
-    - |semis| >= 6: librosa phase vocoder + polyphase resample (保真度更好)
+    模式选择:
+      - preserve_formants=True: 使用 phase vocoder, 变调不变共振峰
+        (配合后续 formant_shift 独立控制音色体型)
+      - preserve_formants=False: 使用 polyphase resample,
+        变调同时改变共振峰 (更快, 无相位伪影, 用于不需要独立共振峰控制的场景)
+
+    preserve_formants 语义:
+      True  = 仅变调, 声带振源频率变化但声道滤波器不变 (声道体型感不变)
+      False = 变调且共振峰随之变化 (整体重采样, 体型感随变调改变)
     """
     if semitones == 0:
         return audio.copy()
 
     semitones = np.clip(semitones, -12, 12)
-    rate = 2.0 ** (semitones / 12.0)
 
-    # 预加重: 轻微高频提升补偿重采样损失 (语音清晰度)
-    if abs(semitones) > 2:
-        audio = audio.astype(np.float64)
-        pre = 0.0 if abs(semitones) < 4 else -0.15
-        if pre != 0:
-            audio = np.append(audio[0], audio[1:] + pre * (audio[1:] - audio[:-1]))
-        audio = audio.astype(np.float32)
-
-    if abs(semitones) < 6 and abs(semitones) > 0:
-        # ----- 模式 A: polyphase resample-only (干净，无相位伪影) -----
+    if preserve_formants or abs(semitones) >= 6:
+        # ----- 模式 B: phase vocoder (保共振峰, 或大偏移需要相位稳定性) -----
+        # phase vocoder 在 STFT 域调整 F0 而保持包络不变 → 共振峰不变
+        shifted = librosa.effects.pitch_shift(
+            y=audio.astype(np.float32), sr=sr, n_steps=semitones,
+            res_type='scipy',
+        )
+    else:
+        # ----- 模式 A: polyphase resample (变调同时改共振峰, 更干净) -----
+        # 重采样改变采样率 → 音高和共振峰同步变化
+        rate = 2.0 ** (semitones / 12.0)
         orig_len = len(audio)
         target_sr = int(sr * rate)
         target_sr = max(1000, min(target_sr, sr * 4))
@@ -69,19 +76,8 @@ def pitch_shift(audio: np.ndarray, sr: int, semitones: float,
         else:
             shifted = np.pad(shifted, (0, orig_len - len(shifted)))
 
-        # 后归一化防止重采样引入的微小过冲
-        max_val = np.max(np.abs(shifted))
-        if max_val > 0.99:
-            shifted = shifted * 0.99 / max_val
-        return shifted.astype(np.float32)
-    else:
-        # ----- 模式 B: librosa pitch_shift (大偏移, scipy resample) -----
-        # 大偏移时 phase vocoder 已平滑暂态, scipy FFT resample 不会振铃
-        shifted = librosa.effects.pitch_shift(
-            y=audio.astype(np.float32), sr=sr, n_steps=semitones,
-            res_type='scipy',
-        )
-        max_val = np.max(np.abs(shifted))
-        if max_val > 0.99:
-            shifted = shifted * 0.99 / max_val
-        return shifted.astype(np.float32)
+    # 后归一化防止过冲
+    max_val = np.max(np.abs(shifted))
+    if max_val > 0.99:
+        shifted = shifted * 0.99 / max_val
+    return shifted.astype(np.float32)

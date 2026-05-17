@@ -156,6 +156,59 @@ def comb_filter_metallic(audio: np.ndarray, sr: int, freq: float = 1000.0) -> np
     return output.astype(np.float32)
 
 
+def noise_gate(audio: np.ndarray, sr: int,
+               threshold_db: float = -50,
+               attack_ms: float = 5,
+               release_ms: float = 100,
+               knee_db: float = 6) -> np.ndarray:
+    """
+    软噪声门 (v1): RMS 包络跟随 + 软拐点增益
+
+    当信号 RMS 低于阈值时平滑衰减增益，抑制静音段的噪声底。
+    拐点区域用平方律过渡避免硬开关咔哒声。
+    """
+    threshold = 10 ** (threshold_db / 20.0)
+    knee_width = 10 ** ((threshold_db - knee_db) / 20.0)
+
+    # RMS 包络检测 (20ms 帧, 75% 重叠)
+    frame_len = int(sr * 0.02)
+    hop = frame_len // 4
+    n_frames = max(1, (len(audio) - frame_len) // hop)
+
+    # 逐帧 RMS → 插值包络
+    rms_env = np.zeros(len(audio))
+    for i in range(n_frames):
+        start = i * hop
+        end = min(start + frame_len, len(audio))
+        rms = np.sqrt(np.mean(audio[start:end] ** 2))
+        rms_env[start:end] = rms
+
+    # attack/release 平滑
+    attack = np.exp(-1.0 / (sr * attack_ms / 1000.0))
+    release = np.exp(-1.0 / (sr * release_ms / 1000.0))
+    smooth_env = np.zeros_like(rms_env)
+    env_val = 0.0
+    for i in range(len(rms_env)):
+        if rms_env[i] > env_val:
+            env_val = attack * env_val + (1 - attack) * rms_env[i]
+        else:
+            env_val = release * env_val + (1 - release) * rms_env[i]
+        smooth_env[i] = env_val
+
+    # 计算增益: 低于阈值时衰减, 拐区平方律过渡
+    gain = np.ones(len(audio))
+    gate_region = smooth_env < threshold
+    if np.any(gate_region):
+        full_gate = smooth_env < knee_width
+        gain[full_gate] = (smooth_env[full_gate] / threshold) ** 2 * 0.01
+        knee_region = (~full_gate) & gate_region
+        if np.any(knee_region):
+            t = (smooth_env[knee_region] - knee_width) / (threshold - knee_width)
+            gain[knee_region] = t ** 2
+
+    return (audio * gain).astype(np.float32)
+
+
 def soft_knee_compressor(audio: np.ndarray, sr: int,
                          threshold_db: float = COMPRESSOR_THRESHOLD,
                          ratio: float = COMPRESSOR_RATIO,

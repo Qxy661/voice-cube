@@ -102,50 +102,72 @@ class RVCEngine:
 
     def _infer_simulate(self, audio: np.ndarray, sr: int, f0: np.ndarray) -> np.ndarray:
         """
-        模拟推理模式 (v6): DSP方法模拟音色变化
+        模拟推理模式 (v7): 源-滤波语音转换模拟
 
-        v6 精简:
-          - 仅保留 formant_shift + pitch_shift + reverb
-          - 移除 compressors/exciter/EQ (过度处理导致声音发糊变小)
+        基于开源变声器通行做法的简化的源-滤波模型:
+          1. STFT → 倒谱包络 (声道滤波) + 精细结构 (声源激励)
+          2. 声道滤波按目标角色扭曲/调整
+          3. 声源激励变调到目标基频
+          4. 重合成 → 混响润色
+
+        修正 v6 的 formant 方向错误: ratio > 1.0 = 共振峰上移(明亮/小体型)
         """
-        from dsp.formant_shift import formant_shift
         from dsp.pitch_shift import pitch_shift
-        from dsp.effects import comb_reverb
+        from dsp.effects import comb_reverb, noise_gate
 
-        # 角色特化 DSP 参数 (v6: 简化，仅保留核心参数)
+        # 角色特化参数 (v7: 修正 formant 方向)
         model_effects = {
             "kobe": {
-                "formant": 1.15, "pitch": -2, "reverb": 0.25,
+                "formant": 0.88,         # 压低共振峰 → 深沉宽厚
+                "pitch": -3,              # 降低音高 → 成熟感
+                "reverb": 0.25,
+                "bass_boost": 4,          # 低频增强 → 温暖
+                "treble_boost": -2,       # 高频衰减 → 柔和
             },
             "spongebob": {
-                "formant": 0.65, "pitch": 5, "reverb": 0.1,
+                "formant": 1.35,          # 抬高共振峰 → 明亮卡通
+                "pitch": 7,               # 大幅提高音高
+                "reverb": 0.1,
+                "bass_boost": -3,
+                "treble_boost": 3,
             },
             "_default": {
-                "formant": 1.1, "pitch": -1, "reverb": 0.2,
+                "formant": 0.92,
+                "pitch": -1,
+                "reverb": 0.2,
+                "bass_boost": 2,
+                "treble_boost": 0,
             },
         }
 
         effects = model_effects.get(self.current_model_name, model_effects["_default"])
 
-        # Step 1: 共振峰移位 (改变体型感)
+        # Step 1: 噪声门控 (抑制静音段)
+        output = noise_gate(audio, sr)
+
+        # Step 2: 共振峰移位 (声道滤波改变 → 音色/体型感改变)
+        from dsp.formant_shift import formant_shift
         if effects["formant"] != 1.0:
-            output = formant_shift(audio, sr, effects["formant"])
+            output = formant_shift(output, sr, effects["formant"])
         else:
-            output = audio.copy()
+            output = output.copy()
 
-        # Step 2: 变调
+        # Step 3: 目标角色 EQ 塑形 (增强/减弱特定频段模拟角色音色特征)
+        from dsp.postprocessor import parametric_eq
+        output = parametric_eq(output, sr,
+                               bass_boost=effects.get("bass_boost", 0),
+                               treble_boost=effects.get("treble_boost", 0))
+
+        # Step 4: 变调 (preserve_formants=True → 仅改基频不改共振峰)
         if effects["pitch"] != 0:
-            output = pitch_shift(output, sr, effects["pitch"])
+            output = pitch_shift(output, sr, effects["pitch"],
+                                 preserve_formants=True)
 
-        # Step 3: 混响 (仅润色，不过度)
+        # Step 5: 混响润色
         if effects.get("reverb", 0) > 0:
             output = comb_reverb(output, sr, effects["reverb"])
 
-        # Step 4: 温和的临场感提升 + makeup gain (防止"没波动")
-        from dsp.postprocessor import parametric_eq
-        output = parametric_eq(output, sr, bass_boost=0, treble_boost=2.0)
-
-        # 补增益: 恢复因滤波/变调损失的电平, 保留动态范围
+        # Step 6: 补增益 (恢复电平, 保留动态范围)
         rms_in = np.sqrt(np.mean(audio ** 2)) if len(audio) > 0 else 0.01
         rms_out = np.sqrt(np.mean(output ** 2)) if len(output) > 0 else 0.01
         if rms_out > 1e-6 and rms_in > 1e-6:

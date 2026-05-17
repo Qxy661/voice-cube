@@ -184,25 +184,19 @@ def _stft_formant_shift(audio: np.ndarray, ratio: float) -> np.ndarray:
     orig_bins = np.arange(n_freq)
     warped_env = np.zeros_like(envelope)
 
+    #  频率扭曲: 统一使用 new_bins = orig_bins / ratio
+    #   ratio > 1.0 → 拉伸 → 共振峰上移 (小体型, 明亮)
+    #   ratio < 1.0 → 压缩 → 共振峰下移 (大体型, 低沉)
+    new_bins = orig_bins / ratio
+    for f in range(n_frames):
+        warped_env[:, f] = np.interp(
+            new_bins, orig_bins, envelope[:, f],
+            left=envelope[0, f], right=envelope[-1, f],
+        )
     if ratio > 1.0:
-        # 拉伸: 共振峰上移
-        new_bins = orig_bins / ratio
-        for f in range(n_frames):
-            warped_env[:, f] = np.interp(
-                new_bins, orig_bins, envelope[:, f],
-                left=envelope[0, f], right=envelope[-1, f],
-            )
         # 倾斜补偿: 拉伸后高频能量扩散, 轻微提升
         tilt_comp = np.log(ratio) * 0.5
         warped_env[:n_freq//2] += tilt_comp
-    else:
-        # 压缩: 共振峰下移
-        new_bins = orig_bins * ratio
-        for f in range(n_frames):
-            warped_env[:, f] = np.interp(
-                new_bins, orig_bins, envelope[:, f],
-                left=envelope[0, f], right=envelope[-1, f],
-            )
 
     # 6. Combine fine + warped envelope
     new_log_mag = fine + warped_env

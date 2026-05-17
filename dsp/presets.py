@@ -12,7 +12,7 @@ DSP_PRESETS = {
         "category": "basic",
         "params": {
             "pitch_shift": -2,
-            "formant_ratio": 1.05,
+            "formant_ratio": 0.92,      # 压低共振峰 → 大体型感 → 深沉
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
@@ -30,7 +30,7 @@ DSP_PRESETS = {
         "category": "basic",
         "params": {
             "pitch_shift": 4,
-            "formant_ratio": 0.82,
+            "formant_ratio": 1.22,       # 抬高共振峰 → 小体型感 → 明亮
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
@@ -66,7 +66,7 @@ DSP_PRESETS = {
         "category": "basic",
         "params": {
             "pitch_shift": 6,
-            "formant_ratio": 0.70,
+            "formant_ratio": 1.40,       # 大幅抬高共振峰 → 小体型 → 高亢
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
@@ -102,7 +102,7 @@ DSP_PRESETS = {
         "category": "basic",
         "params": {
             "pitch_shift": -5,
-            "formant_ratio": 1.30,
+            "formant_ratio": 0.70,       # 压低共振峰 → 大体型 → 深沉威严
             "ring_mod": 0.0,
             "ring_freq": 0,
             "telephone": False,
