@@ -170,7 +170,7 @@ AI_PRESETS = {
     "spongebob": {
         "name": "海绵宝宝",
         "icon": "🧽",
-        "description": "海绵宝宝的经典尖细声 (DSP 模拟)",
+        "description": "海绵宝宝的经典尖细声 (RVC PyTorch 推理)",
         "category": "ai",
         "model_path": "assets/models/spongebob.pth",
     },

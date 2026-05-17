@@ -24,6 +24,11 @@ REQUIRED_MODELS = {
         "size_mb": 293,
         "description": "ContentVec 语义特征提取器 (RVC v1, 256-dim)",
     },
+    "vec-768-layer-12.onnx": {
+        "url": f"{BASE_URL}/vec-768-layer-12.onnx",
+        "size_mb": 360,
+        "description": "ContentVec 语义特征提取器 (RVC v2, 768-dim)",
+    },
     "rmvpe.onnx": {
         "url": f"{BASE_URL}/rmvpe.onnx",
         "size_mb": 362,

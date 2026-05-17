@@ -45,6 +45,7 @@ temp_*.wav
 # Model weights (git-lfs 管理大文件)
 assets/models/*.pth
 assets/models/*.bin
+assets/models/*.onnx
 
 # Logs
 *.log

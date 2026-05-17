@@ -100,11 +100,11 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
     # Step 2: 预加重 (提升高频, 使后续处理更准确)
     audio_f64 = _pre_emphasis(audio.astype(np.float64))
 
-    # Step 3: 变调 (如果后续还要做独立 formant_shift, 则关闭 preserve_formants)
+    # Step 3: 变调 (始终保留共振峰 — 由后续独立 formant_shift 控制音色)
     has_formant = abs(params.get("formant_ratio", 1.0) - 1.0) > 0.01
     if params.get("pitch_shift", 0) != 0:
         audio_f64 = pitch_shift(audio_f64, sr, params["pitch_shift"],
-                                preserve_formants=(not has_formant))
+                                preserve_formants=True)
 
     # Step 4: 共振峰移位 (仅在需要时)
     if has_formant:
