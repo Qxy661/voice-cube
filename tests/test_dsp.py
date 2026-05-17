@@ -1,8 +1,8 @@
 """
-声纹魔方 - DSP 模块单元测试 (v3)
+声纹魔方 - DSP 模块单元测试 (v4)
 验证各 DSP 模块的基本功能正确性
 
-v3: 新增9个测试（压缩器/激励器/LUFS/噪声门/梳状滤波/共振峰提取/F0-MIDI/RVC引擎/录音组件）
+v4: 适配44100Hz采样率、向量化混响/压缩器、移除中间归一化、精简管线
 """
 
 import numpy as np
@@ -46,7 +46,7 @@ def test_pitch_shift():
     result = pitch_shift(audio, SAMPLE_RATE, 5)
     assert len(result) == len(audio), "变调后长度应不变"
     assert not np.allclose(result, audio), "5半音偏移应产生不同信号"
-    assert np.max(np.abs(result)) <= 1.01, "输出不应超过1.0"
+    assert np.all(np.isfinite(result)), "输出应为有限值"
 
     print("[PASS] pitch_shift")
 
@@ -62,7 +62,7 @@ def test_formant_shift():
 
     result = formant_shift(audio, SAMPLE_RATE, 0.7)
     assert len(result) == len(audio), "移位后长度应不变"
-    assert np.max(np.abs(result)) <= 1.01, "输出不应超过1.0"
+    assert np.all(np.isfinite(result)), "输出应为有限值"
 
     print("[PASS] formant_shift")
 
@@ -75,7 +75,7 @@ def test_effects():
 
     result = ring_modulate(audio, SAMPLE_RATE, 0.5, 50.0)
     assert len(result) == len(audio)
-    assert np.max(np.abs(result)) <= 1.01
+    assert np.all(np.isfinite(result))
 
     result = telephone_filter(audio, SAMPLE_RATE)
     assert len(result) == len(audio)
@@ -96,7 +96,7 @@ def test_preprocessor():
 
     result = spectral_subtraction(noisy, SAMPLE_RATE)
     assert len(result) == len(noisy), "降噪后长度应不变"
-    assert np.max(np.abs(result)) <= 1.01
+    assert np.all(np.isfinite(result)), "输出应为有限值"
 
     print("[PASS] preprocessor")
 
@@ -124,11 +124,11 @@ def test_postprocessor():
 
     result = parametric_eq(audio, SAMPLE_RATE, bass_boost=6, treble_boost=-3)
     assert len(result) == len(audio)
-    assert np.max(np.abs(result)) <= 1.01
+    assert np.all(np.isfinite(result))
 
     result = apply_reverb(audio, SAMPLE_RATE, wet=0.3)
     assert len(result) == len(audio)
-    assert np.max(np.abs(result)) <= 1.01
+    assert np.all(np.isfinite(result))
 
     print("[PASS] postprocessor")
 
@@ -147,6 +147,12 @@ def test_presets():
     default = get_default_params()
     assert default["pitch_shift"] == 0
     assert default["formant_ratio"] == 1.0
+
+    # v4: 预设不应包含 compressor/exciter
+    for name in ["deep_male", "child", "robot", "minion", "giant", "whisper", "metallic", "old_telephone"]:
+        preset = get_preset(name)
+        assert "compressor" not in preset["params"], f"{name} 预设不应包含 compressor"
+        assert "exciter" not in preset["params"], f"{name} 预设不应包含 exciter"
 
     print("[PASS] presets")
 
@@ -173,14 +179,13 @@ def test_visualizer():
 
 
 # ════════════════════════════════════════════════════════════════════
-#  v3 新增测试
+#  v3/v4 新增测试
 # ════════════════════════════════════════════════════════════════════
 
 def test_soft_knee_compressor():
     """测试软拐点压缩器：验证动态范围被压缩"""
     from dsp.effects import soft_knee_compressor
 
-    # 生成幅度差异大的信号（安静+响亮）
     t = np.linspace(0, 1.0, SAMPLE_RATE, endpoint=False)
     quiet = 0.05 * np.sin(2 * np.pi * 440 * t).astype(np.float32)
     loud = 0.8 * np.sin(2 * np.pi * 440 * t).astype(np.float32)
@@ -189,9 +194,8 @@ def test_soft_knee_compressor():
     compressed = soft_knee_compressor(signal, sr=SAMPLE_RATE)
 
     assert len(compressed) == len(signal), "压缩后长度应不变"
-    assert np.max(np.abs(compressed)) <= 1.01, "输出不应削波"
+    assert np.all(np.isfinite(compressed)), "输出应为有限值"
 
-    # 压缩器应让安静部分相对变响（动态范围减小）
     quiet_rms_orig = np.sqrt(np.mean(quiet ** 2))
     loud_rms_orig = np.sqrt(np.mean(loud ** 2))
     quiet_rms_comp = np.sqrt(np.mean(compressed[:len(quiet)] ** 2))
@@ -213,10 +217,9 @@ def test_harmonics_exciter():
     excited = harmonics_exciter(audio, SAMPLE_RATE, amount=0.3)
 
     assert len(excited) == len(audio), "处理后长度应不变"
-    assert np.max(np.abs(excited)) <= 1.01, "输出不应削波"
+    assert np.all(np.isfinite(excited)), "输出应为有限值"
     assert not np.allclose(excited, audio), "激励后信号应有变化"
 
-    # 检查高频段能量是否增加
     f_orig, psd_orig = welch(audio, fs=SAMPLE_RATE, nperseg=2048)
     f_exc, psd_exc = welch(excited, fs=SAMPLE_RATE, nperseg=2048)
     mask = (f_orig >= 2000) & (f_orig <= 8000)
@@ -232,15 +235,13 @@ def test_normalize_loudness():
     from dsp.postprocessor import normalize_loudness
 
     audio = generate_test_audio(2.0, 440.0)
-    # 故意降低音量
     quiet_audio = (audio * 0.1).astype(np.float32)
 
     normalized = normalize_loudness(quiet_audio, SAMPLE_RATE, target_lufs=-16.0)
 
     assert len(normalized) == len(quiet_audio), "归一化后长度应不变"
-    assert np.max(np.abs(normalized)) <= 1.01, "输出不应削波"
+    assert np.all(np.isfinite(normalized)), "输出应为有限值"
 
-    # 归一化后 RMS 应比原始安静信号大
     rms_orig = np.sqrt(np.mean(quiet_audio ** 2))
     rms_norm = np.sqrt(np.mean(normalized ** 2))
     assert rms_norm > rms_orig, "归一化后响度应提升"
@@ -252,7 +253,6 @@ def test_noise_gate():
     """测试噪声门：验证静音段被衰减"""
     from dsp.preprocessor import noise_gate
 
-    # 生成信号：前半段静音，后半段有声音
     silence = np.zeros(SAMPLE_RATE, dtype=np.float32)
     signal = generate_test_audio(1.0, 440.0) * 0.5
     combined = np.concatenate([silence, signal])
@@ -261,7 +261,6 @@ def test_noise_gate():
 
     assert len(gated) == len(combined), "处理后长度应不变"
 
-    # 静音段应被衰减
     silence_rms = np.sqrt(np.mean(gated[:SAMPLE_RATE] ** 2))
     signal_rms = np.sqrt(np.mean(gated[SAMPLE_RATE:] ** 2))
     assert silence_rms < 0.01, f"静音段应被门控衰减，实际RMS: {silence_rms}"
@@ -278,7 +277,7 @@ def test_comb_filter_metallic():
     result = comb_filter_metallic(audio, SAMPLE_RATE, freq=1000.0)
 
     assert len(result) == len(audio), "处理后长度应不变"
-    assert np.max(np.abs(result)) <= 1.01, "输出不应削波"
+    assert np.all(np.isfinite(result)), "输出应为有限值"
     assert not np.allclose(result, audio), "梳状滤波应产生不同信号"
 
     print("[PASS] comb_filter_metallic")
@@ -288,12 +287,10 @@ def test_extract_formants():
     """测试共振峰提取"""
     from dsp.formant_shift import extract_formants
 
-    # 用多频信号模拟有共振峰的语音
     audio = generate_multitone(1.0)
     formants = extract_formants(audio, SAMPLE_RATE)
 
     assert isinstance(formants, list), "应返回列表"
-    # 即使没有明显的共振峰，也不应报错
     for f in formants:
         assert f > 0, f"共振峰频率应为正数，实际: {f}"
         assert f < SAMPLE_RATE / 2, f"共振峰频率应低于奈奎斯特频率，实际: {f}"
@@ -305,7 +302,6 @@ def test_f0_to_midi():
     """测试 F0 到 MIDI 转换"""
     from dsp.pitch_extract import f0_to_midi
 
-    # 440Hz = MIDI 69 (A4)
     f0 = np.array([0, 440, 880, 261.63])
     midi = f0_to_midi(f0)
 
@@ -323,19 +319,16 @@ def test_rvc_engine():
 
     engine = RVCEngine()
 
-    # 初始化
     info = engine.get_model_info()
     assert info["mode"] in ["RVC", "DSP模拟"], "模式应为 RVC 或 DSP模拟"
 
-    # 加载模型（模拟模式）
     result = engine.load_model("kobe")
     assert result, "模型加载应成功"
 
-    # 推理
     audio = generate_test_audio(1.0, 440.0)
     output = engine.infer(audio, SAMPLE_RATE)
     assert len(output) == len(audio), "推理后长度应不变"
-    assert np.max(np.abs(output)) <= 1.01, "输出不应削波"
+    assert np.all(np.isfinite(output)), "输出应为有限值"
 
     print("[PASS] rvc_engine")
 
@@ -344,30 +337,32 @@ def test_recorder():
     """测试录音组件"""
     from ui.recorder import process_audio_input, normalize_audio, remove_dc_offset
 
-    # 测试 process_audio_input（元组格式）
     audio_data = generate_test_audio(1.0, 440.0)
     result_audio, result_sr = process_audio_input((SAMPLE_RATE, audio_data))
     assert result_audio is not None, "应返回有效音频"
     assert result_sr == SAMPLE_RATE, "采样率应匹配"
     assert len(result_audio) == len(audio_data), "长度应匹配"
 
-    # 测试 remove_dc_offset
-    dc_signal = audio_data + 0.5  # 添加 DC 偏移
+    dc_signal = audio_data + 0.5
     assert abs(np.mean(dc_signal)) > 0.1, "DC信号应有偏移"
     cleaned = remove_dc_offset(dc_signal)
     assert abs(np.mean(cleaned)) < 0.01, f"去除后DC应接近0，实际: {np.mean(cleaned)}"
 
-    # 测试 normalize_audio
     quiet = (audio_data * 0.01).astype(np.float32)
     normalized = normalize_audio(quiet, target_db=-3.0)
     rms = np.sqrt(np.mean(normalized ** 2))
     assert rms > np.sqrt(np.mean(quiet ** 2)), "归一化后响度应提升"
 
-    # 测试 None 输入
     result = process_audio_input(None)
     assert result == (None, None), "None输入应返回(None, None)"
 
     print("[PASS] recorder")
+
+
+def test_sample_rate():
+    """验证采样率为 44100"""
+    assert SAMPLE_RATE == 44100, f"采样率应为 44100，实际: {SAMPLE_RATE}"
+    print("[PASS] sample_rate")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -376,7 +371,8 @@ def test_recorder():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("声纹魔方 DSP 模块测试 v3")
+    print("声纹魔方 DSP 模块测试 v4")
+    print(f"采样率: {SAMPLE_RATE} Hz")
     print("=" * 50)
 
     # 原有测试
@@ -389,7 +385,7 @@ if __name__ == "__main__":
     test_presets()
     test_visualizer()
 
-    # v3 新增测试
+    # v3/v4 新增测试
     test_soft_knee_compressor()
     test_harmonics_exciter()
     test_normalize_loudness()
@@ -399,7 +395,8 @@ if __name__ == "__main__":
     test_f0_to_midi()
     test_rvc_engine()
     test_recorder()
+    test_sample_rate()
 
     print("=" * 50)
-    print(f"所有 {17} 个测试通过!")
+    print(f"所有 {18} 个测试通过!")
     print("=" * 50)

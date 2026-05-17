@@ -194,11 +194,6 @@ def formant_shift(audio: np.ndarray, sr: int, ratio: float,
     output[:len(audio)][nonzero[:len(audio)]] /= window_sum[:len(audio)][nonzero[:len(audio)]]
     output = output[:len(audio)]
 
-    # 归一化
-    max_val = np.max(np.abs(output))
-    if max_val > 1.0:
-        output = output / max_val
-
     return output.astype(np.float32)
 
 

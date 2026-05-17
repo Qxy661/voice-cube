@@ -88,10 +88,6 @@ def spectral_subtraction(
     nonzero = window_sum > 1e-8
     output[nonzero] /= window_sum[nonzero]
 
-    max_val = np.max(np.abs(output))
-    if max_val > 1.0:
-        output = output / max_val
-
     return output.astype(np.float32)
 
 

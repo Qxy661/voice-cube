@@ -81,11 +81,6 @@ def pitch_shift(audio: np.ndarray, sr: int, semitones: float,
         compensation = np.clip(compensation, 0.7, 1.4)
         shifted_audio = formant_shift(shifted_audio, sr, compensation)
 
-    # 归一化防止削波
-    max_val = np.max(np.abs(shifted_audio))
-    if max_val > 1.0:
-        shifted_audio = shifted_audio / max_val
-
     return shifted_audio.astype(np.float32)
 
 
@@ -137,9 +132,5 @@ def pitch_shift_psola(audio: np.ndarray, sr: int, semitones: float) -> np.ndarra
             result = np.pad(result, (0, target_length - len(result)))
     else:
         result = stretched
-
-    max_val = np.max(np.abs(result))
-    if max_val > 1.0:
-        result = result / max_val
 
     return result.astype(np.float32)

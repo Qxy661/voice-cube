@@ -4,7 +4,7 @@ Voice Cube - Global Configuration
 """
 
 # ==================== 音频参数 ====================
-SAMPLE_RATE = 22050          # 标准采样率
+SAMPLE_RATE = 44100          # 标准采样率 (语音质量优先)
 HOP_LENGTH = 512             # STFT 帧移
 N_FFT = 2048                 # STFT 窗长
 N_MELS = 128                 # Mel 频带数
@@ -33,10 +33,10 @@ TELEPHONE_HIGH = 3400         # 电话带通高频 (Hz)
 FILTER_ORDER = 127            # FIR 滤波器阶数 (从101提到127，更陡峭)
 
 # ==================== 混响参数 ====================
-REVERB_DELAYS = [1557, 1617, 1491, 1422]  # Schroeder 梳状滤波器延迟 (samples)
-REVERB_GAINS = [0.80, 0.82, 0.78, 0.76]  # 对应增益
-ALLPASS_DELAYS = [225, 556]               # 全通滤波器延迟
-ALLPASS_GAIN = 0.7                         # 全通增益
+REVERB_DELAYS_SEC = [0.0353, 0.0366, 0.0338, 0.0322]  # 梳状滤波器延迟 (秒)
+REVERB_GAINS = [0.80, 0.82, 0.78, 0.76]               # 对应增益
+ALLPASS_DELAYS_SEC = [0.0051, 0.0126]                  # 全通滤波器延迟 (秒)
+ALLPASS_GAIN = 0.7                                      # 全通增益
 
 # ==================== 压缩器参数 ====================
 COMPRESSOR_THRESHOLD = -20    # 压缩阈值 (dB)

@@ -23,8 +23,8 @@ from dsp.presets import DSP_PRESETS, AI_PRESETS, get_preset, get_default_params
 from dsp.pitch_shift import pitch_shift
 from dsp.formant_shift import formant_shift
 from dsp.effects import (
-    ring_modulate, telephone_filter, comb_reverb, add_breathiness,
-    comb_filter_metallic, soft_knee_compressor, harmonics_exciter,
+    ring_modulate, telephone_filter, add_breathiness,
+    comb_filter_metallic,
 )
 from dsp.preprocessor import spectral_subtraction
 from dsp.pitch_extract import extract_f0
@@ -48,11 +48,11 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
                      pitch_shift_val=None, formant_ratio_val=None,
                      ring_mod_val=None, reverb_val=None,
                      breathiness_val=None) -> tuple:
-    """应用 DSP 预设处理音频 (v3: 含压缩器/激励器/LUFS归一化)"""
+    """应用 DSP 预设处理音频 (v4: 精简管线，仅最终归一化)"""
     if audio is None:
         return None, None
 
-    audio = np.clip(audio, -1.0, 1.0)
+    audio = np.clip(audio, -1.0, 1.0).astype(np.float64)
     if sr != SAMPLE_RATE:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
         sr = SAMPLE_RATE
@@ -79,43 +79,31 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
     if params.get("formant_ratio", 1.0) != 1.0:
         audio = formant_shift(audio, sr, params["formant_ratio"])
 
-    # Step 3: 环形调制
+    # Step 3: 特效（按需选择性应用，不叠加）
     if params.get("ring_mod", 0) > 0:
         ring_freq = params.get("ring_freq", 50)
         audio = ring_modulate(audio, sr, params["ring_mod"], ring_freq)
-
-    # Step 4: 电话滤波
-    if params.get("telephone", False):
+    elif params.get("telephone", False):
         audio = telephone_filter(audio, sr)
-
-    # Step 5: 梳状滤波
-    if params.get("comb_filter", False):
+    elif params.get("comb_filter", False):
         audio = comb_filter_metallic(audio, sr)
 
-    # Step 6: 气声
+    # Step 4: 气声
     if params.get("breathiness", 0) > 0:
         audio = add_breathiness(audio, sr, params["breathiness"])
 
-    # Step 7: 谐波激励器 (增加清晰度，防止发闷)
-    exciter_amount = params.get("exciter", 0)
-    if exciter_amount > 0:
-        audio = harmonics_exciter(audio, sr, amount=exciter_amount)
-
-    # Step 8: 动态压缩 (让安静部分更响，整体更均匀)
-    if params.get("compressor", False):
-        audio = soft_knee_compressor(audio, sr)
-
-    # Step 9: 混响
+    # Step 5: 混响
     if params.get("reverb", 0) > 0:
         audio = apply_reverb(audio, sr, params["reverb"])
 
-    # Step 10: EQ
+    # Step 6: EQ
     bass_boost = params.get("eq_bass_boost", 0)
     treble_boost = params.get("eq_treble_boost", 0)
     if bass_boost != 0 or treble_boost != 0:
         audio = parametric_eq(audio, sr, bass_boost=bass_boost, treble_boost=treble_boost)
 
-    # Step 11: LUFS 响度归一化
+    # 最终: 防削波 + LUFS 响度归一化（仅此一次）
+    audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
     audio = normalize_loudness(audio, sr)
 
     return audio, sr
@@ -208,13 +196,19 @@ def process_ai_clone(audio_input, clone_target, custom_model_file):
             {"name": "成品", "icon": "✨", "status": "pending"},
         ]
 
-        # Step 2: DSP 降噪
+        # Step 2: DSP 降噪 (仅在检测到噪声时)
         t0 = time.time()
         steps[1]["status"] = "active"
-        try:
-            denoised = spectral_subtraction(audio, sr)
-        except Exception as e:
-            logger.warning(f"谱减法降噪失败，使用原音频: {e}")
+        # 简单噪声检测：前导帧 RMS 低于阈值则认为有噪声底
+        pre_rms = np.sqrt(np.mean(audio[:min(sr, len(audio))] ** 2))
+        needs_denoise = pre_rms > 0.001  # 有信号才降噪
+        if needs_denoise:
+            try:
+                denoised = spectral_subtraction(audio, sr)
+            except Exception as e:
+                logger.warning(f"谱减法降噪失败，使用原音频: {e}")
+                denoised = audio
+        else:
             denoised = audio
         steps[1]["status"] = "done"
         steps[1]["time"] = f"{time.time()-t0:.2f}s"
