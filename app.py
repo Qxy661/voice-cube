@@ -71,12 +71,14 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
     if breathiness_val is not None:
         params["breathiness"] = breathiness_val
 
-    # Step 1: 变调 (带共振峰保护)
+    # Step 1: 变调 (如果后续还要做独立 formant_shift, 则关闭 preserve_formants)
+    has_formant = abs(params.get("formant_ratio", 1.0) - 1.0) > 0.01
     if params.get("pitch_shift", 0) != 0:
-        audio = pitch_shift(audio, sr, params["pitch_shift"], preserve_formants=True)
+        audio = pitch_shift(audio, sr, params["pitch_shift"],
+                            preserve_formants=(not has_formant))
 
-    # Step 2: 共振峰移位
-    if params.get("formant_ratio", 1.0) != 1.0:
+    # Step 2: 共振峰移位 (仅在需要时)
+    if has_formant:
         audio = formant_shift(audio, sr, params["formant_ratio"])
 
     # Step 3: 特效（按需选择性应用，不叠加）

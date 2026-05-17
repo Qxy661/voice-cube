@@ -3,7 +3,7 @@
 纯数字信号处理算法实现，拒绝深度学习黑盒
 """
 
-from .pitch_shift import pitch_shift, pitch_shift_psola
+from .pitch_shift import pitch_shift
 from .formant_shift import formant_shift, extract_formants
 from .effects import (
     ring_modulate, telephone_filter, comb_reverb, add_breathiness,
@@ -21,7 +21,7 @@ from .visualizer import (
 from .presets import get_preset, list_presets, DSP_PRESETS, AI_PRESETS
 
 __all__ = [
-    "pitch_shift", "pitch_shift_psola",
+    "pitch_shift",
     "formant_shift", "extract_formants",
     "ring_modulate", "telephone_filter", "comb_reverb", "add_breathiness",
     "comb_filter_metallic", "soft_knee_compressor", "harmonics_exciter",
