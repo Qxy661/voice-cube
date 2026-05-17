@@ -52,7 +52,7 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
     if audio is None:
         return None, None
 
-    audio = np.clip(audio, -1.0, 1.0).astype(np.float64)
+    audio = _soft_limiter(audio)
     if sr != SAMPLE_RATE:
         audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
         sr = SAMPLE_RATE
@@ -104,11 +104,28 @@ def apply_dsp_preset(audio: np.ndarray, sr: int, preset_name: str,
     if bass_boost != 0 or treble_boost != 0:
         audio = parametric_eq(audio, sr, bass_boost=bass_boost, treble_boost=treble_boost)
 
-    # 最终: 防削波 + LUFS 响度归一化（仅此一次）
-    audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
+    # 最终: 软限幅 + LUFS 响度归一化（仅此一次）
+    audio = _soft_limiter(audio).astype(np.float32)
     audio = normalize_loudness(audio, sr)
 
     return audio, sr
+
+
+def _soft_limiter(audio: np.ndarray, threshold: float = 0.85) -> np.ndarray:
+    """
+    软限幅器: 用 tanh 平滑削波替代硬裁切，消除方波失真
+
+    - < threshold: 直通
+    - >= threshold: tanh 曲线过渡到 1.0
+    """
+    audio = audio.astype(np.float64)
+    mask = np.abs(audio) > threshold
+    if np.any(mask):
+        excess = np.abs(audio[mask]) - threshold
+        # 在过渡区使用 tanh 软拐点
+        soft = threshold + (1.0 - threshold) * np.tanh(excess / (1.0 - threshold))
+        audio[mask] = np.sign(audio[mask]) * soft
+    return audio
 
 
 def process_basic_imitation(audio_input, preset_name,
@@ -183,7 +200,7 @@ def process_ai_clone(audio_input, clone_target, custom_model_file):
         return None, None, None, None, None, None, None, None, None
 
     try:
-        audio = np.clip(audio, -1.0, 1.0)
+        audio = _soft_limiter(audio)
         if sr != SAMPLE_RATE:
             audio = librosa.resample(audio, orig_sr=sr, target_sr=SAMPLE_RATE)
             sr = SAMPLE_RATE

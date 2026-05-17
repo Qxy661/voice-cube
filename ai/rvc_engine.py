@@ -141,6 +141,17 @@ class RVCEngine:
         if effects.get("reverb", 0) > 0:
             output = comb_reverb(output, sr, effects["reverb"])
 
+        # Step 4: 温和的临场感提升 + makeup gain (防止"没波动")
+        from dsp.postprocessor import parametric_eq
+        output = parametric_eq(output, sr, bass_boost=0, treble_boost=2.0)
+
+        # 补增益: 恢复因滤波/变调损失的电平, 保留动态范围
+        rms_in = np.sqrt(np.mean(audio ** 2)) if len(audio) > 0 else 0.01
+        rms_out = np.sqrt(np.mean(output ** 2)) if len(output) > 0 else 0.01
+        if rms_out > 1e-6 and rms_in > 1e-6:
+            gain = min(rms_in / rms_out * 1.1, 3.0)
+            output = output * gain
+
         return output.astype(np.float32)
 
     def get_model_info(self) -> dict:

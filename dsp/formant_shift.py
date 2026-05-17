@@ -54,34 +54,61 @@ def _lpc(signal: np.ndarray, order: int, pre_emphasis: float = 0.0) -> np.ndarra
     return a
 
 
+def _low_shelf_coeffs(fc, gain_db, sr, Q=0.707):
+    """低频搁架滤波器系数 (RBJ Cookbook)"""
+    w0 = 2 * np.pi * fc / sr
+    A = 10 ** (gain_db / 40.0)
+    alpha = np.sin(w0) / (2 * Q)
+    b0 = A * ((A + 1) - (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * alpha)
+    b1 = 2 * A * ((A - 1) - (A + 1) * np.cos(w0))
+    b2 = A * ((A + 1) - (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * alpha)
+    a0 = (A + 1) + (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * alpha
+    a1 = -2 * ((A - 1) + (A + 1) * np.cos(w0))
+    a2 = (A + 1) + (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * alpha
+    return np.array([b0/a0, b1/a0, b2/a0]), np.array([1.0, a1/a0, a2/a0])
+
+
+def _high_shelf_coeffs(fc, gain_db, sr, Q=0.707):
+    """高频搁架滤波器系数 (RBJ Cookbook)"""
+    w0 = 2 * np.pi * fc / sr
+    A = 10 ** (gain_db / 40.0)
+    alpha = np.sin(w0) / (2 * Q)
+    b0 = A * ((A + 1) + (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * alpha)
+    b1 = -2 * A * ((A - 1) + (A + 1) * np.cos(w0))
+    b2 = A * ((A + 1) + (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * alpha)
+    a0 = (A + 1) - (A - 1) * np.cos(w0) + 2 * np.sqrt(A) * alpha
+    a1 = 2 * ((A - 1) - (A + 1) * np.cos(w0))
+    a2 = (A + 1) - (A - 1) * np.cos(w0) - 2 * np.sqrt(A) * alpha
+    return np.array([b0/a0, b1/a0, b2/a0]), np.array([1.0, a1/a0, a2/a0])
+
+
 def _formant_eq_approximation(audio: np.ndarray, ratio: float) -> np.ndarray:
     """
-    EQ 近似共振峰变化 (v6 新增)
-    对微小比例变化使用双二阶倾斜滤波替代 LPC 重合成
+    EQ 近似共振峰变化 (v7): 双二阶搁架滤波器
+
+    使用 RBJ 搁架滤波器替代旧的差分高通，避免高频增益不稳定。
 
     ratio > 1.0 = 提升高频 (更亮/更小体型感)
     ratio < 1.0 = 衰减高频 (更暗/更大体型感)
     """
     sr = SAMPLE_RATE
 
-    # 将 ratio 映射为 dB 倾斜量
-    # ratio 1.05 → 约 +0.75 dB tilt (轻微更亮)
-    # ratio 1.20 → 约 +3.0 dB tilt (明显更亮)
-    # ratio 0.85 → 约 -2.5 dB tilt (明显更暗)
-    tilt_db = (ratio - 1.0) * 15.0
+    # ratio → dB 搁架增益
+    tilt_db = (ratio - 1.0) * 12.0
 
     if abs(tilt_db) < 0.5:
         return audio.copy()
 
-    # 设计一阶倾斜滤波器: y[n] = x[n] + k * (x[n] - x[n-1])
-    # k > 0 提升高频, k < 0 衰减高频
-    k = tilt_db / 60.0  # 映射系数
-    k = np.clip(k, -0.8, 0.8)
+    output = audio.astype(np.float64)
 
-    output = np.zeros_like(audio, dtype=np.float64)
-    output[0] = audio[0]
-    for i in range(1, len(audio)):
-        output[i] = audio[i] + k * (audio[i] - audio[i - 1])
+    if tilt_db > 0:
+        # 提升: 高频搁架 boost
+        b, a = _high_shelf_coeffs(3000, tilt_db, sr)
+    else:
+        # 衰减: 低频搁架 cut (等效于相对提升高频)
+        b, a = _low_shelf_coeffs(500, tilt_db, sr)
+
+    output = lfilter(b, a, output)
 
     return output.astype(np.float32)
 
