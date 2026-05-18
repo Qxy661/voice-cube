@@ -149,6 +149,79 @@ DSP_PRESETS = {
             "comb_filter": True,
         }
     },
+    # ── 卡通角色 DSP 模拟 ──
+    "lazy_goat": {
+        "name": "懒羊羊",
+        "icon": "🐑",
+        "description": "懒羊羊的懒散可爱声线 (DSP 模拟)",
+        "category": "basic",
+        "params": {
+            "pitch_shift": 3,
+            "formant_ratio": 1.25,      # 抬高共振峰 → 小体型 → 可爱
+            "ring_mod": 0.0,
+            "ring_freq": 0,
+            "telephone": False,
+            "reverb": 0.08,
+            "eq_bass_boost": -2,
+            "eq_treble_boost": 2,
+            "breathiness": 0.15,        # 轻微气声 → 懒散感
+            "comb_filter": False,
+        }
+    },
+    "bear_two": {
+        "name": "熊二",
+        "icon": "🐻",
+        "description": "熊二的憨厚低沉声线 (DSP 模拟)",
+        "category": "basic",
+        "params": {
+            "pitch_shift": -4,
+            "formant_ratio": 0.85,      # 压低共振峰 → 大体型 → 憨厚
+            "ring_mod": 0.0,
+            "ring_freq": 0,
+            "telephone": False,
+            "reverb": 0.15,
+            "eq_bass_boost": 5,
+            "eq_treble_boost": -2,
+            "breathiness": 0.0,
+            "comb_filter": False,
+        }
+    },
+    "belial": {
+        "name": "贝利亚",
+        "icon": "👹",
+        "description": "贝利亚的威严邪恶声线 (DSP 模拟)",
+        "category": "basic",
+        "params": {
+            "pitch_shift": -6,
+            "formant_ratio": 0.78,      # 大幅压低共振峰 → 巨大体型 → 威严
+            "ring_mod": 0.2,
+            "ring_freq": 80,
+            "telephone": False,
+            "reverb": 0.35,
+            "eq_bass_boost": 6,
+            "eq_treble_boost": 1,
+            "breathiness": 0.0,
+            "comb_filter": False,
+        }
+    },
+    "mambo": {
+        "name": "曼波",
+        "icon": "🐧",
+        "description": "曼波的活泼尖细声线 (DSP 模拟)",
+        "category": "basic",
+        "params": {
+            "pitch_shift": 5,
+            "formant_ratio": 1.35,      # 高共振峰 → 小体型 → 活泼
+            "ring_mod": 0.0,
+            "ring_freq": 0,
+            "telephone": False,
+            "reverb": 0.05,
+            "eq_bass_boost": -3,
+            "eq_treble_boost": 3,
+            "breathiness": 0.0,
+            "comb_filter": False,
+        }
+    },
 }
 
 # ==================== 进阶区：AI 模仿特定人物 ====================
@@ -173,6 +246,34 @@ AI_PRESETS = {
         "description": "海绵宝宝的经典尖细声 (RVC PyTorch 推理)",
         "category": "ai",
         "model_path": "assets/models/spongebob.pth",
+    },
+    "lazy_goat_ai": {
+        "name": "懒羊羊(AI)",
+        "icon": "🐑",
+        "description": "懒羊羊的可爱声线 (DSP 模拟, 待训练 RVC 模型)",
+        "category": "ai",
+        "model_path": None,
+    },
+    "bear_two_ai": {
+        "name": "熊二(AI)",
+        "icon": "🐻",
+        "description": "熊二的憨厚声线 (DSP 模拟, 待训练 RVC 模型)",
+        "category": "ai",
+        "model_path": None,
+    },
+    "belial_ai": {
+        "name": "贝利亚(AI)",
+        "icon": "👹",
+        "description": "贝利亚的威严声线 (DSP 模拟, 待训练 RVC 模型)",
+        "category": "ai",
+        "model_path": None,
+    },
+    "mambo_ai": {
+        "name": "曼波(AI)",
+        "icon": "🐧",
+        "description": "曼波的活泼声线 (DSP 模拟, 待训练 RVC 模型)",
+        "category": "ai",
+        "model_path": None,
     },
     "custom": {
         "name": "自定义",

@@ -289,13 +289,30 @@ class RVCEngine:
                 if orig is None and mod_name in sys.modules:
                     del sys.modules[mod_name]
 
-    # ─── PyTorch RVC 推理 ──────────────────────────────────
+    # ─── PyTorch RVC 推理 (v2: 对齐官方管线) ──────────────
+
+    # RVC 帧率: 16kHz / 160 samples = 100fps
+    RVC_WINDOW = 160      # 每帧样本数 (@16kHz)
+    RVC_FPS = 100         # 帧率 = 16000 / 160
+    RVC_PAD_SEC = 0.08    # 反射填充秒数
 
     def _infer_rvc_pytorch(self, audio: np.ndarray, sr: int, f0: np.ndarray) -> np.ndarray:
-        """PyTorch RVC 推理管线"""
+        """
+        PyTorch RVC 推理管线 (v2)
+
+        对齐官方 RVC 管线:
+          1. 重采样到 16kHz + 归一化 + 高通滤波
+          2. 反射填充 (与官方一致的 window//2 padding)
+          3. ContentVec 特征提取 → 2x 上采样 (50fps→100fps)
+          4. F0 提取 @100fps (hop=160 at 16kHz)
+          5. 模型推理 (phone, phone_lengths, pitch, pitchf, sid)
+          6. RMS 匹配 + 裁剪填充 + 重采样回原 sr
+        """
         torch = self._torch
         try:
-            # Step 1: 重采样到 16kHz
+            orig_audio = audio.copy()
+
+            # ── Step 1: 重采样到 16kHz + 归一化 ──
             if sr != RVC_SAMPLE_RATE:
                 audio_16k = librosa.resample(
                     audio.astype(np.float32), orig_sr=sr, target_sr=RVC_SAMPLE_RATE,
@@ -303,68 +320,100 @@ class RVCEngine:
             else:
                 audio_16k = audio.astype(np.float32).copy()
 
-            # Step 2: 高通滤波 48Hz
-            sos = butter(5, 48.0 / (RVC_SAMPLE_RATE / 2), btype="high", output="sos")
-            audio_16k = sosfilt(sos, audio_16k).astype(np.float32)
+            # 归一化 (防止削波, 与官方一致)
+            audio_max = np.abs(audio_16k).max() / 0.95
+            if audio_max > 1:
+                audio_16k /= audio_max
 
-            # Step 3: 反射填充
-            pad_len = int(RVC_SAMPLE_RATE * 0.08)
-            audio_pad = np.pad(audio_16k, pad_len, mode="reflect")
+            # ── Step 2: 高通滤波 48Hz ──
+            sos_hp = butter(5, 48.0 / (RVC_SAMPLE_RATE / 2), btype="high", output="sos")
+            audio_16k = sosfilt(sos_hp, audio_16k).astype(np.float32)
 
-            # Step 4: ContentVec 特征提取
+            # ── Step 3: 反射填充 ──
+            pad_samples = int(RVC_SAMPLE_RATE * self.RVC_PAD_SEC)
+            audio_pad = np.pad(audio_16k, (pad_samples, pad_samples), mode="reflect")
+
+            # ── Step 4: ContentVec 特征提取 ──
             phone = self._extract_content_features(audio_pad)
             if phone is None:
                 logger.warning("ContentVec 特征提取失败, 回退 DSP 模拟")
                 return self._infer_simulate(audio, sr, f0)
 
-            # Step 5: F0 → pitch (mel-scale coarse + fine)
-            pitch_int, pitch_f = self._f0_to_pitch(f0, sr, audio_pad.shape[0], phone)
+            # ── Step 5: 2x 上采样 phone 特征 (50fps → 100fps) ──
+            # 官方管线: feats = F.interpolate(feats.permute(0,2,1), scale_factor=2).permute(0,2,1)
+            phone_t = torch.from_numpy(phone).to(self._device)
+            if phone_t.dim() == 3:
+                phone_t = torch.nn.functional.interpolate(
+                    phone_t.permute(0, 2, 1), scale_factor=2
+                ).permute(0, 2, 1)
+            phone_np = phone_t.cpu().numpy()
+            T_phone = phone_np.shape[1]
 
-            # Step 6: 构建输入张量
+            # ── Step 6: F0 提取 @100fps (hop=160 at 16kHz) ──
+            # 从 padded 音频提取, 与 phone 特征对齐
+            f0_rvc = self._extract_f0_rvc(audio_pad)
+            p_len = min(T_phone, len(f0_rvc))
+            f0_rvc = f0_rvc[:p_len]
+
+            # F0 → mel-scale coarse pitch + fine pitch
+            f0_mel_min = 1127.0 * np.log1p(50.0 / 700.0)
+            f0_mel_max = 1127.0 * np.log1p(1100.0 / 700.0)
+            f0_mel = 1127.0 * np.log1p(f0_rvc / 700.0)
+            f0_mel[f0_rvc > 0] = (f0_mel[f0_rvc > 0] - f0_mel_min) * 254 / (f0_mel_max - f0_mel_min) + 1
+            f0_mel[f0_rvc <= 1] = 1
+            f0_mel[f0_mel > 255] = 255
+            pitch_int = np.rint(f0_mel).astype(np.int64)[np.newaxis, :p_len]
+            pitch_f = f0_rvc.astype(np.float32)[np.newaxis, :p_len]
+
+            # 截断 phone 到 p_len
+            phone_np = phone_np[:, :p_len, :]
+
+            # ── Step 7: 构建输入张量 ──
             device = self._device
-            phone_t = torch.from_numpy(phone).to(device)
-            pitch_t = torch.from_numpy(pitch_int).to(device)
-            pitchf_t = torch.from_numpy(pitch_f).to(device)
-
-            # Speaker ID (单 speaker 模型) + phone_lengths
+            phone_tensor = torch.from_numpy(phone_np).to(device)
+            pitch_tensor = torch.from_numpy(pitch_int).to(device)
+            pitchf_tensor = torch.from_numpy(pitch_f).to(device)
             ds = torch.LongTensor([0]).to(device)
-            phone_lengths = torch.LongTensor([phone.shape[1]]).to(device)
+            phone_lengths = torch.LongTensor([p_len]).to(device)
 
-            # Step 7: 推理 (签名: phone, phone_lengths, pitch, nsff0, sid)
+            # ── Step 8: 模型推理 ──
             with torch.no_grad():
                 audio_out = self._net_g.infer(
-                    phone_t, phone_lengths, pitch_t, pitchf_t, ds,
+                    phone_tensor, phone_lengths, pitch_tensor, pitchf_tensor, ds,
                 )[0][0, 0].cpu().numpy()
 
-            # Step 8: 后处理 — 裁剪填充
-            out_trimmed = audio_out[pad_len * self._tgt_sr // RVC_SAMPLE_RATE:
-                                     -pad_len * self._tgt_sr // RVC_SAMPLE_RATE] \
-                          if len(audio_out) > pad_len * 2 * self._tgt_sr // RVC_SAMPLE_RATE \
-                          else audio_out
+            # ── Step 9: 裁剪填充 ──
+            # 输出采样数 = 帧数 * (tgt_sr / fps)
+            # 填充对应的输出样本 = pad_samples * (tgt_sr / 16000)
+            out_samples_per_frame = self._tgt_sr / self.RVC_FPS
+            pad_out = int(pad_samples * self._tgt_sr / RVC_SAMPLE_RATE)
+            if len(audio_out) > pad_out * 2:
+                audio_out = audio_out[pad_out:-pad_out]
 
-            # Step 9: 重采样回原 sr
+            # ── Step 10: RMS 匹配 (保留原始语音动态) ──
+            audio_out = self._change_rms(audio_16k, RVC_SAMPLE_RATE, audio_out, self._tgt_sr, rate=0.8)
+
+            # ── Step 11: 重采样回原 sr ──
             if sr != self._tgt_sr:
-                out_final = librosa.resample(
-                    out_trimmed, orig_sr=self._tgt_sr, target_sr=sr,
-                )
+                out_final = librosa.resample(audio_out, orig_sr=self._tgt_sr, target_sr=sr)
             else:
-                out_final = out_trimmed
+                out_final = audio_out
 
-            # Step 10: 对齐长度
-            target_len = len(audio)
+            # ── Step 12: 对齐长度 ──
+            target_len = len(orig_audio)
             if len(out_final) > target_len:
                 out_final = out_final[:target_len]
             elif len(out_final) < target_len:
                 out_final = np.pad(out_final, (0, target_len - len(out_final)))
 
-            # Step 11: 输出质量验证
+            # ── Step 13: 输出质量验证 ──
             out_rms = np.sqrt(np.mean(out_final ** 2))
             if out_rms < 1e-6:
                 logger.warning(f"PyTorch RVC 输出静音 (RMS={out_rms:.2e}), 回退 DSP")
-                return self._infer_simulate(audio, sr, f0)
+                return self._infer_simulate(orig_audio, sr, f0)
             if np.any(np.isnan(out_final)) or np.any(np.isinf(out_final)):
                 logger.warning("PyTorch RVC 输出含 NaN/Inf, 回退 DSP")
-                return self._infer_simulate(audio, sr, f0)
+                return self._infer_simulate(orig_audio, sr, f0)
 
             logger.info(f"PyTorch RVC 推理完成 ({len(out_final)} samples, RMS={out_rms:.4f})")
             return out_final.astype(np.float32)
@@ -372,6 +421,52 @@ class RVCEngine:
         except Exception as e:
             logger.error(f"PyTorch RVC 推理失败: {e}, 回退 DSP 模拟")
             return self._infer_simulate(audio, sr, f0)
+
+    def _extract_f0_rvc(self, audio_16k: np.ndarray) -> np.ndarray:
+        """
+        RVC 专用 F0 提取: hop=160 @16kHz → 100fps
+
+        与官方 RVC 管线一致:
+          - 采样率: 16000 Hz
+          - hop_length: 160 samples (= window)
+          - 帧率: 100 fps
+          - F0 范围: 50-1100 Hz
+        """
+        f0, voiced_flag, voiced_probs = librosa.pyin(
+            audio_16k.astype(np.float64),
+            fmin=50,
+            fmax=1100,
+            sr=RVC_SAMPLE_RATE,
+            hop_length=self.RVC_WINDOW,
+        )
+        # NaN → 0 (未检测到基频的帧)
+        f0 = np.nan_to_num(f0, nan=0.0).astype(np.float32)
+        return f0
+
+    def _change_rms(self, data1: np.ndarray, sr1: int, data2: np.ndarray, sr2: int, rate: float) -> np.ndarray:
+        """
+        RMS 匹配: 将 data2 的响度匹配到 data1 的风格
+
+        rate: data2 的占比 (0=完全匹配data1, 1=保持data2原样)
+        官方 RVC 使用 rms_mix_rate=0.8
+        """
+        torch = self._torch
+        rms1 = librosa.feature.rms(y=data1, frame_length=sr1 // 2 * 2, hop_length=sr1 // 2)
+        rms2 = librosa.feature.rms(y=data2, frame_length=sr2 // 2 * 2, hop_length=sr2 // 2)
+        rms1_t = torch.from_numpy(rms1)
+        rms1_t = torch.nn.functional.interpolate(
+            rms1_t.unsqueeze(0), size=data2.shape[0], mode="linear"
+        ).squeeze()
+        rms2_t = torch.from_numpy(rms2)
+        rms2_t = torch.nn.functional.interpolate(
+            rms2_t.unsqueeze(0), size=data2.shape[0], mode="linear"
+        ).squeeze()
+        rms2_t = torch.max(rms2_t, torch.zeros_like(rms2_t) + 1e-6)
+        data2 = data2 * (
+            torch.pow(rms1_t, torch.tensor(1 - rate))
+            * torch.pow(rms2_t, torch.tensor(rate - 1))
+        ).numpy()
+        return data2
 
     # ─── ONNX 推理 (真实 RVC) ─────────────────────────────
 
@@ -600,7 +695,7 @@ class RVCEngine:
         from dsp.formant_shift import formant_shift
         from dsp.postprocessor import parametric_eq, normalize_loudness
 
-        # 角色特化参数 (v8: 补齐 woman_1, 保留 formant 方向)
+        # 角色特化参数 (v9: 补齐卡通角色)
         model_effects = {
             "woman_1": {
                 "formant": 1.15,
@@ -620,6 +715,34 @@ class RVCEngine:
                 "formant": 1.35,
                 "pitch": 7,
                 "reverb": 0.1,
+                "bass_boost": -3,
+                "treble_boost": 3,
+            },
+            "lazy_goat_ai": {
+                "formant": 1.25,
+                "pitch": 3,
+                "reverb": 0.08,
+                "bass_boost": -2,
+                "treble_boost": 2,
+            },
+            "bear_two_ai": {
+                "formant": 0.85,
+                "pitch": -4,
+                "reverb": 0.15,
+                "bass_boost": 5,
+                "treble_boost": -2,
+            },
+            "belial_ai": {
+                "formant": 0.78,
+                "pitch": -6,
+                "reverb": 0.35,
+                "bass_boost": 6,
+                "treble_boost": 1,
+            },
+            "mambo_ai": {
+                "formant": 1.35,
+                "pitch": 5,
+                "reverb": 0.05,
                 "bass_boost": -3,
                 "treble_boost": 3,
             },
