@@ -275,6 +275,27 @@ AI_PRESETS = {
         "category": "ai",
         "model_path": "assets/models/mambo.pth",
     },
+    "hatsune_miku": {
+        "name": "初音ミク",
+        "icon": "🎤",
+        "description": "初音未来 Vocaloid 虚拟歌姬声线 (RVC PyTorch 推理, 250epoch)",
+        "category": "ai",
+        "model_path": "assets/models/hatsune_miku.pth",
+    },
+    "paimon": {
+        "name": "派蒙",
+        "icon": "✨",
+        "description": "原神派蒙的活泼可爱声线 (RVC PyTorch 推理, 400epoch)",
+        "category": "ai",
+        "model_path": "assets/models/paimon.pth",
+    },
+    "raiden_shogun": {
+        "name": "雷电将军",
+        "icon": "⚡",
+        "description": "原神雷电将军的冷峻成熟声线 (RVC PyTorch 推理, 300epoch)",
+        "category": "ai",
+        "model_path": "assets/models/raiden_shogun.pth",
+    },
     "custom": {
         "name": "自定义",
         "icon": "📁",

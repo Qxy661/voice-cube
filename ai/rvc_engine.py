@@ -746,6 +746,27 @@ class RVCEngine:
                 "bass_boost": -3,
                 "treble_boost": 3,
             },
+            "hatsune_miku": {
+                "formant": 1.20,
+                "pitch": 4,
+                "reverb": 0.10,
+                "bass_boost": -2,
+                "treble_boost": 3,
+            },
+            "paimon": {
+                "formant": 1.25,
+                "pitch": 3,
+                "reverb": 0.08,
+                "bass_boost": -2,
+                "treble_boost": 2,
+            },
+            "raiden_shogun": {
+                "formant": 0.95,
+                "pitch": -2,
+                "reverb": 0.15,
+                "bass_boost": 2,
+                "treble_boost": 0,
+            },
             "_default": {
                 "formant": 0.92,
                 "pitch": -1,
