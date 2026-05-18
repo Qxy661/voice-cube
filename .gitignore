@@ -46,6 +46,7 @@ temp_*.wav
 assets/models/*.pth
 assets/models/*.bin
 assets/models/*.onnx
+assets/models/*.index
 
 # Logs
 *.log

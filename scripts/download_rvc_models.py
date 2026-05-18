@@ -54,6 +54,20 @@ OPTIONAL_MODELS = {
     },
 }
 
+# HuggingFace 社区 PyTorch 模型 (RVC v2, .pth)
+COMMUNITY_MODELS = {
+    "spongebob.pth": {
+        "url": "https://huggingface.co/abus/aiconverter/resolve/main/spongebob.pth",
+        "size_mb": 54,
+        "description": "海绵宝宝 RVC v2 音色 (PyTorch, 48kHz)",
+    },
+    "mambo.pth": {
+        "url": "https://huggingface.co/juzi45/RVC_Matikanetannhauser/resolve/main/uma-Matikane_Tannhauser.pth",
+        "size_mb": 55,
+        "description": "曼波 RVC v2 音色 (赛马娘 Matikane Tannhauser, PyTorch, 48kHz)",
+    },
+}
+
 
 def download_file(url: str, dest: str, desc: str = "") -> bool:
     """下载文件，显示进度条"""
@@ -111,7 +125,7 @@ def main():
         existing.add(name)
 
     # Step 2: 可选模型
-    print("\n[Step 2/2] 可选模型 (按需下载)")
+    print("\n[Step 2/3] 可选模型 (按需下载)")
     print("-" * 40)
     for name, info in OPTIONAL_MODELS.items():
         dest = os.path.join(MODELS_DIR, name)
@@ -122,16 +136,35 @@ def main():
         print(f"  [选项] {name} ({info['size_mb']} MB) — {info['description']}")
         # 可选模型不自动下载，提示用户
 
+    # Step 3: 社区 PyTorch 模型
+    print("\n[Step 3/3] 社区 RVC 模型 (HuggingFace)")
+    print("-" * 40)
+    for name, info in COMMUNITY_MODELS.items():
+        dest = os.path.join(MODELS_DIR, name)
+        if name in existing:
+            size_mb = os.path.getsize(dest) / (1024 * 1024)
+            print(f"  [SKIP] {name} ({size_mb:.0f} MB) — 已存在")
+            continue
+        print(f"  [下载] {name} ({info['size_mb']} MB) — {info['description']}")
+        ok = download_file(info["url"], dest, desc=name)
+        if not ok:
+            all_ok = False
+        existing.add(name)
+
     print("\n" + "=" * 60)
     if all_ok:
-        print("  必需模型下载完成! 可用人物:")
-        print("    - woman_1 (女声)")
-        print("    - kobe (DSP 模拟, 无 ONNX 模型)")
-        print("    - spongebob (DSP 模拟, 无 ONNX 模型)")
-        print("\n  如需更多人物模型:")
-        print("    1. 访问 https://huggingface.co/ozada/onnx_rvc")
-        print("    2. 下载 .onnx 文件放入 assets/models/")
-        print("    3. 修改 dsp/presets.py 添加对应预设")
+        print("  模型下载完成! 可用人物:")
+        print("    基础区 (DSP 模拟):")
+        print("      deep_male, child, robot, minion, giant, whisper, metallic")
+        print("      lazy_goat, bear_two, belial, mambo (卡通角色)")
+        print("    进阶区 (AI 推理):")
+        print("      woman_1 — 通用女声 (ONNX)")
+        print("      spongebob — 海绵宝宝 (PyTorch)")
+        print("      mambo — 曼波/赛马娘 (PyTorch)")
+        print("      kobe — 科比 (DSP 模拟)")
+        print("    待训练:")
+        print("      lazy_goat_ai, bear_two_ai, belial_ai")
+        print("      (可从 klrvc.com 获取或自行训练 RVC 模型)")
     else:
         print("  部分模型下载失败, 请重试")
     print("=" * 60)
